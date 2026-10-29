@@ -61,10 +61,18 @@ run_static_checks() {
         tests/test_bsp_audio_recovery.c components/bsp/src/bsp_es8311_sleep_check.c \
         -o "${test_dir}/test_bsp_audio_recovery"
     "${test_dir}/test_bsp_audio_recovery"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+        -Imain tests/test_snake_logic.c main/snake_logic.c \
+        -o "${test_dir}/test_snake_logic"
+    "${test_dir}/test_snake_logic"
+    local gc_flag="-Wl,--gc-sections"
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        gc_flag="-Wl,-dead_strip"
+    fi
     for demo in audio low_power ble wifi; do
         "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
             -ffunction-sections -fdata-sections -Itests/demo_stubs -Imain \
-            "tests/test_demo_${demo}_runtime.c" -Wl,--gc-sections \
+            "tests/test_demo_${demo}_runtime.c" ${gc_flag} \
             -o "${test_dir}/test_demo_${demo}_runtime"
         "${test_dir}/test_demo_${demo}_runtime"
     done
@@ -81,6 +89,16 @@ run_static_checks() {
 
 run_firmware_checks() (
     local validation_build_dir
+
+    if ! command -v idf.py >/dev/null 2>&1; then
+        for idf_candidate in "${IDF_PATH:-}/export.sh" "${HOME}/esp/esp-idf-v5.5.3/export.sh" "/Users/mac/esp/esp-idf-v5.5.3/export.sh"; do
+            if [[ -f "${idf_candidate}" ]]; then
+                # shellcheck disable=SC1090
+                TMPDIR=/tmp . "${idf_candidate}" >/dev/null 2>&1 || true
+                break
+            fi
+        done
+    fi
 
     if ! command -v idf.py >/dev/null 2>&1; then
         echo "ERROR: idf.py is not available; activate ESP-IDF 5.5.3 first." >&2
