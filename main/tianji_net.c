@@ -442,8 +442,21 @@ static void voice_playback_task(void *pvParameters) {
 
     esp_err_t err = esp_http_client_open(p_client, 0);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "无法连接音频下载服务: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "主域名音频拉取失败 (%s)，尝试回退至局域网直连拉取...", esp_err_to_name(err));
         esp_http_client_cleanup(p_client);
+
+        snprintf(full_audio_url, sizeof(full_audio_url), "%s%s", TIANJI_GATEWAY_LAN_AUDIO_BASE, s_voice_audio_url);
+        play_cfg.url = full_audio_url;
+        play_cfg.crt_bundle_attach = NULL;
+        p_client = esp_http_client_init(&play_cfg);
+        if (p_client) {
+            err = esp_http_client_open(p_client, 0);
+        }
+    }
+
+    if (err != ESP_OK || !p_client) {
+        ESP_LOGE(TAG, "最终无法连接音频下载服务: %s", esp_err_to_name(err));
+        if (p_client) esp_http_client_cleanup(p_client);
         s_voice_state = TIANJI_VOICE_STATE_IDLE;
         s_playback_task_handle = NULL;
         vTaskDelete(NULL);
@@ -522,8 +535,10 @@ static void voice_interaction_task(void *pvParameters) {
     }
 
     // 1. 初始化 HTTP 客户端并开启 Chunked 流式 POST
+    // 优先尝试主网关地址，若失败自动回退尝试局域网直连地址
+    const char *target_url = TIANJI_GATEWAY_URL;
     esp_http_client_config_t v_cfg = {
-        .url = TIANJI_GATEWAY_URL,
+        .url = target_url,
         .method = HTTP_METHOD_POST,
         .timeout_ms = TIANJI_GATEWAY_TIMEOUT_MS,
         .buffer_size = 1024,
@@ -542,16 +557,30 @@ static void voice_interaction_task(void *pvParameters) {
         return;
     }
 
-    // 设置 Chunked 与 Multipart 报头
     esp_http_client_set_header(client, "Content-Type", "multipart/form-data; boundary=" MULTIPART_BOUNDARY);
     esp_http_client_set_header(client, "Transfer-Encoding", "chunked");
 
     esp_err_t err = esp_http_client_open(client, -1);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "打开网关 HTTP 连接失败: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "主网关连接失败 (%s)，尝试回退至局域网直连地址: %s", esp_err_to_name(err), TIANJI_GATEWAY_LAN_URL);
         esp_http_client_cleanup(client);
+
+        target_url = TIANJI_GATEWAY_LAN_URL;
+        v_cfg.url = target_url;
+        v_cfg.crt_bundle_attach = NULL; // 局域网 http 不需要证书校验
+        client = esp_http_client_init(&v_cfg);
+        if (client) {
+            esp_http_client_set_header(client, "Content-Type", "multipart/form-data; boundary=" MULTIPART_BOUNDARY);
+            esp_http_client_set_header(client, "Transfer-Encoding", "chunked");
+            err = esp_http_client_open(client, -1);
+        }
+    }
+
+    if (err != ESP_OK || !client) {
+        ESP_LOGE(TAG, "打开网关 HTTP 连接最终失败: %s", esp_err_to_name(err));
+        if (client) esp_http_client_cleanup(client);
         s_voice_state = TIANJI_VOICE_STATE_ERROR;
-        snprintf(s_voice_text_reply, sizeof(s_voice_text_reply), "无法连通语音网关，请确认 Wi-Fi 热点已开启并联网。");
+        snprintf(s_voice_text_reply, sizeof(s_voice_text_reply), "无法连通语音网关，请确认手机热点已连接。");
         if (s_voice_callback) s_voice_callback(s_voice_state, s_voice_text_reply);
         s_voice_task_handle = NULL;
         vTaskDelete(NULL);
@@ -610,10 +639,11 @@ static void voice_interaction_task(void *pvParameters) {
 
     uint32_t total_chunks = 0;
     uint32_t silence_chunks = 0;
-    const uint32_t MAX_CHUNKS = 250;       // 8.0 秒 (250 * 32ms)
-    const uint32_t MIN_CHUNKS = 30;        // 至少录制 1.0 秒
-    const uint32_t SILENCE_LIMIT = 156;    // 连续检测 5.0 秒静音自动截止
-    const int SILENCE_THRESHOLD_RMS = 400; // 静音阈值
+    bool has_spoken = false;
+    const uint32_t MAX_CHUNKS = 250;       // 8.0 秒上限 (250 * 32ms)
+    const uint32_t INITIAL_SILENCE_LIMIT = 156; // 开始录音后5.0秒未说话自动截止
+    const uint32_t TAIL_SILENCE_LIMIT = 110;    // 说话后停顿3.5秒自动截止
+    const int VOICE_ACTIVE_RMS = 500;           // 语音激活RMS阈值
 
     ESP_LOGI(TAG, "麦克风采集已开启，请对准设备陈述求测之事...");
 
@@ -624,22 +654,29 @@ static void voice_interaction_task(void *pvParameters) {
             continue;
         }
 
-        // 计算 RMS 能量
+        // 计算去直流偏置的真实交流 RMS 能量
         int16_t *samples = (int16_t *)rec_buf;
-        int64_t sum_sq = 0;
+        int64_t mean_sum = 0;
         for (int i = 0; i < 512; i++) {
-            int32_t s = samples[i];
-            sum_sq += s * s;
+            mean_sum += samples[i];
         }
-        int rms = (int)sqrt((double)sum_sq / 512.0);
-        int vol = (rms > 7000) ? 100 : (rms * 100 / 7000);
+        int16_t mean_val = (int16_t)(mean_sum / 512);
+
+        int64_t ac_sum_sq = 0;
+        for (int i = 0; i < 512; i++) {
+            int32_t diff = samples[i] - mean_val;
+            ac_sum_sq += diff * diff;
+        }
+        int rms = (int)sqrt((double)ac_sum_sq / 512.0);
+        int vol = (rms > 6000) ? 100 : (rms * 100 / 6000);
         s_voice_current_volume = vol;
 
-        // 静音检测
-        if (rms < SILENCE_THRESHOLD_RMS) {
-            silence_chunks++;
-        } else {
+        // 语音活动与静音计数判定
+        if (rms >= VOICE_ACTIVE_RMS) {
+            has_spoken = true;
             silence_chunks = 0;
+        } else {
+            silence_chunks++;
         }
 
         // 边录边发一个 chunk
@@ -649,15 +686,21 @@ static void voice_interaction_task(void *pvParameters) {
         }
         total_chunks++;
 
-        // 连续 5 秒静音且已录制至少 1 秒时自动结束
-        if (total_chunks >= MIN_CHUNKS && silence_chunks >= SILENCE_LIMIT) {
-            ESP_LOGI(TAG, "检测到连续 5 秒静音，自动结束录音");
+        // 1. 若 5 秒整未检测到有效说话，自动截止
+        if (!has_spoken && total_chunks >= INITIAL_SILENCE_LIMIT) {
+            ESP_LOGI(TAG, "连续 5 秒未检测到说话声音，自动结束录音");
+            break;
+        }
+        // 2. 若开口说话后尾随停顿达 3.5 秒，自动截止
+        if (has_spoken && silence_chunks >= TAIL_SILENCE_LIMIT) {
+            ESP_LOGI(TAG, "说话后停顿超过 3.5 秒，自动结束录音");
             break;
         }
     }
 
     free(rec_buf);
     s_voice_current_volume = 0;
+
     ESP_LOGI(TAG, "录音结束，共采集发送 %lu 块 (约 %.2f 秒)", (unsigned long)total_chunks, total_chunks * 0.032f);
 
     // 4. 发送 multipart 尾部及 HTTP 最终终止 chunk (0\r\n\r\n)

@@ -4,7 +4,6 @@
 // ============================================================================
 // 1. 手机 Wi-Fi 热点配置
 // ============================================================================
-// 请在此修改为手机热点的实际名称与密码：
 #ifndef TIANJI_WIFI_SSID
 #define TIANJI_WIFI_SSID        "NEO"
 #endif
@@ -16,15 +15,7 @@
 // ============================================================================
 // 2. 语音解卦网关配置 (SenseVoice ASR + MiniCPM 5 LLM + EdgeTTS)
 // ============================================================================
-// 网关服务器可通过公网 Tailscale 域名或局域网 IP 直连
-#ifndef TIANJI_GATEWAY_HOST
-#define TIANJI_GATEWAY_HOST       "macminim4.tail20709.ts.net"
-#endif
-
-#ifndef TIANJI_GATEWAY_PORT
-#define TIANJI_GATEWAY_PORT       443
-#endif
-
+// 公网 Tailscale 域名接入点（已通过 Funnel 映射 /api 路径到端口 8765）
 #ifndef TIANJI_GATEWAY_URL
 #define TIANJI_GATEWAY_URL        "https://macminim4.tail20709.ts.net/api/v1/divination/voice"
 #endif
@@ -33,7 +24,16 @@
 #define TIANJI_GATEWAY_AUDIO_BASE "https://macminim4.tail20709.ts.net"
 #endif
 
-// HTTP 超时时间（毫秒，包含 ASR + LLM + TTS 全链路）
+// 局域网直连备份接入点（同一 Wi-Fi 热点下直连，无 TLS 握手内存开销）
+#ifndef TIANJI_GATEWAY_LAN_URL
+#define TIANJI_GATEWAY_LAN_URL    "http://192.168.192.104:8765/api/v1/divination/voice"
+#endif
+
+#ifndef TIANJI_GATEWAY_LAN_AUDIO_BASE
+#define TIANJI_GATEWAY_LAN_AUDIO_BASE "http://192.168.192.104:8765"
+#endif
+
+// HTTP 超时时间（毫秒）
 #define TIANJI_GATEWAY_TIMEOUT_MS 60000
 
 // ============================================================================
