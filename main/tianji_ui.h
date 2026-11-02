@@ -18,7 +18,9 @@ typedef enum {
     TIANJI_VIEW_CASTING,        // 逐次掷爻推演页
     TIANJI_VIEW_OVERVIEW,       // 双盘全息对比总览页
     TIANJI_VIEW_READING,        // 离线断语与经文详情页
-    TIANJI_VIEW_AI,             // 联网 AI 推演页
+    TIANJI_VIEW_AI,             // 联网 AI 推演页（文字呈现与宗师语音播放）
+    TIANJI_VIEW_VOICE_LISTENING,// 【天机倾听中...】语音录制与上传审度页
+    TIANJI_VIEW_VOICE_RETRY,    // 【意念未明】意图不足引导提示页
 } tianji_view_t;
 
 // 按键输入动作枚举 (供主控调度输入)
