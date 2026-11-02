@@ -57,12 +57,9 @@
 // 该脚拉到低电平,所以唤醒按低电平触发。
 #define BSP_BTN_GPIO         0
 
-// 按键判定时序(ms):由 BSP 显式下发给 button 组件,不依赖它的 Kconfig 默认值。
-// 短按判定窗口 180ms 与组件默认一致,写在这里是为了和应用手感放在一起调;
-// 长按组件默认 1500ms,要按住 1.5s 才触发,在这台三键小设备上明显偏迟钝,收敛到 500ms。
-// (组件对 BUTTON_LONG_PRESS_TIME_MS 的 Kconfig 下限同样是 500ms,想再短只能在代码里下发。)
+// 长按阈值设置为 2000ms (2.0s)，严格避免用户短按起卦过程中的误触重置
 #define BSP_BTN_SHORT_PRESS_MS  180   // 短按(单击)判定窗口
-#define BSP_BTN_LONG_PRESS_MS   500   // 长按触发时间
+#define BSP_BTN_LONG_PRESS_MS   2000  // 长按触发时间 (2.0s)
 
 // 每键的电压窗口 {min_mV, max_mV};边界取相邻档中点。
 // 确定键上界留宽到 1900,是为了和松开态的 3300mV 拉开距离。
