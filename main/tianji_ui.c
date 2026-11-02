@@ -42,7 +42,7 @@ static uint8_t s_reading_page = 0; // 0: 卦辞象曰, 1: 事业求财, 2: 姻�
 
 static void refresh_view(void);
 static void on_voice_status_update(tianji_voice_state_t state, const char *msg);
-static void on_ai_status_update(tianji_net_state_t state, const char *msg);
+
 
 // 顶部状态栏 (纯净中文，右上角电量)
 static void build_header(lv_obj_t *parent, const char *title) {
@@ -258,10 +258,11 @@ static void render_view_casting(void) {
             lv_obj_set_style_text_color(lbl_t, lv_color_hex(col), 0);
             const char *desc = "";
             switch (s_session.lines[i]) {
-            case TIANJI_LINE_OLD_YIN:    desc = "老阴○"; break;
-            case TIANJI_LINE_YOUNG_YANG: desc = "少阳"; break;
-            case TIANJI_LINE_YOUNG_YIN:  desc = "少阴"; break;
-            case TIANJI_LINE_OLD_YANG:   desc = "老阳●"; break;
+            case TIANJI_LINE_LAOYIN:   desc = "老阴○"; break;
+            case TIANJI_LINE_SHAOYANG: desc = "少阳"; break;
+            case TIANJI_LINE_SHAOYIN:  desc = "少阴"; break;
+            case TIANJI_LINE_LAOYANG:  desc = "老阳●"; break;
+            default:                   desc = ""; break;
             }
             lv_label_set_text(lbl_t, desc);
             lv_obj_set_pos(lbl_t, 160, cur_y - 4);
@@ -624,18 +625,8 @@ static void on_voice_status_update(tianji_voice_state_t state, const char *msg) 
     }
 }
 
-static void on_ai_status_update(tianji_net_state_t state, const char *msg) {
-    (void)state;
-    (void)msg;
-    if (bsp_lvgl_lock(100)) {
-        if (s_current_view == TIANJI_VIEW_AI) {
-            refresh_view();
-        }
-        bsp_lvgl_unlock();
-    }
-}
-
 static void refresh_view(void) {
+
     if (!s_screen) return;
     lv_obj_clean(s_screen);
 
