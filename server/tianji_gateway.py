@@ -274,6 +274,10 @@ def download_audio(id: str = Query(..., description="音频文件标识，如 xx
         raise HTTPException(status_code=404, detail="音频文件不存在或已失效")
     return FileResponse(path=str(file_path), media_type="audio/wav", filename=clean_id)
 
+@app.head("/api/v1/divination/voice")
+def divination_voice_head():
+    return {"status": "ok"}
+
 @app.post("/api/v1/divination/voice")
 async def divination_voice(
     audio_file: UploadFile = File(..., description="用户语音音频文件"),
@@ -298,12 +302,13 @@ async def divination_voice(
 
     wav_input_path = ensure_wav_format(audio_bytes, audio_file.filename or "input.wav")
 
-    # 2. 语音识别 (ASR)
+    # 2. 语音识别 (ASR) - 使用 to_thread 避免阻塞事件循环
     user_question = ""
     try:
         model = get_asr_model()
         # FunASR SenseVoiceSmall 推理
-        res = model.generate(
+        res = await asyncio.to_thread(
+            model.generate,
             input=wav_input_path,
             cache={},
             language="auto",
@@ -334,10 +339,11 @@ async def divination_voice(
         text_reply = NEED_MORE_INFO_PROMPT
         status = "need_more_info"
     else:
-        # 4. LLM 解卦
+        # 4. LLM 解卦 - 使用 to_thread 异步执行
         status = "success"
         try:
-            llm_reply = query_omlx_llm(
+            llm_reply = await asyncio.to_thread(
+                query_omlx_llm,
                 primary_hex=primary_hex,
                 transformed_hex=transformed_hex,
                 moving_desc=moving_desc,

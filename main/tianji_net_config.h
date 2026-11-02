@@ -15,22 +15,31 @@
 // ============================================================================
 // 2. 语音解卦网关配置 (SenseVoice ASR + MiniCPM 5 LLM + EdgeTTS)
 // ============================================================================
-// 公网 Tailscale 域名接入点（已通过 Funnel 映射 /api 路径到端口 8765）
-#ifndef TIANJI_GATEWAY_URL
-#define TIANJI_GATEWAY_URL        "https://macminim4.tail20709.ts.net/api/v1/divination/voice"
-#endif
-
-#ifndef TIANJI_GATEWAY_AUDIO_BASE
-#define TIANJI_GATEWAY_AUDIO_BASE "https://macminim4.tail20709.ts.net"
-#endif
-
-// 局域网直连备份接入点（同一 Wi-Fi 热点下直连，无 TLS 握手内存开销）
+// 局域网直连极速接入点（首选：同在手机热点/局域网下，<5ms延迟，0 TLS内存开销，永无代理超时）
 #ifndef TIANJI_GATEWAY_LAN_URL
-#define TIANJI_GATEWAY_LAN_URL    "http://192.168.192.104:8765/api/v1/divination/voice"
+#define TIANJI_GATEWAY_LAN_URL        "http://192.168.192.104:8765/api/v1/divination/voice"
 #endif
 
 #ifndef TIANJI_GATEWAY_LAN_AUDIO_BASE
 #define TIANJI_GATEWAY_LAN_AUDIO_BASE "http://192.168.192.104:8765"
+#endif
+
+// 公网 Tailscale 域名备份接入点（备用：外出不在同一局域网时自动回退）
+#ifndef TIANJI_GATEWAY_DOMAIN_URL
+#define TIANJI_GATEWAY_DOMAIN_URL     "https://macminim4.tail20709.ts.net/api/v1/divination/voice"
+#endif
+
+#ifndef TIANJI_GATEWAY_DOMAIN_AUDIO_BASE
+#define TIANJI_GATEWAY_DOMAIN_AUDIO_BASE "https://macminim4.tail20709.ts.net"
+#endif
+
+// 默认首选接入点
+#ifndef TIANJI_GATEWAY_URL
+#define TIANJI_GATEWAY_URL            TIANJI_GATEWAY_LAN_URL
+#endif
+
+#ifndef TIANJI_GATEWAY_AUDIO_BASE
+#define TIANJI_GATEWAY_AUDIO_BASE     TIANJI_GATEWAY_LAN_AUDIO_BASE
 #endif
 
 // HTTP 超时时间（毫秒）

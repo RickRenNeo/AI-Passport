@@ -247,9 +247,7 @@ static void render_view_standby(void) {
 // 界面 2: 逐次起卦推演页（与上一版本完全一致）
 // ============================================================================
 static void render_view_casting(void) {
-    char header_buf[64];
-    snprintf(header_buf, sizeof(header_buf), "起卦推演 第%d爻 共6爻", s_session.current_line);
-    build_header(s_screen, header_buf);
+    build_header(s_screen, "起卦推演");
 
     // 顶部当前投掷铜钱图像与性质展示卡片
     lv_obj_t *coin_bar = lv_obj_create(s_screen);
@@ -454,7 +452,7 @@ static void render_view_overview(void) {
     }
 
     if (tianji_net_is_enabled()) {
-        build_footer(s_screen, "确定键说出所测之事  下键看经文");
+        build_footer(s_screen, "确定键占卜问卦  下键看经文");
     } else {
         build_footer(s_screen, "下键看经文，长按2秒重起");
     }
@@ -505,10 +503,10 @@ static void render_view_reading(void) {
 }
 
 // ============================================================================
-// 界面 5: 语音问事页（原“天机倾听”更名为自然易懂的“语音问事”）
+// 界面 5: 占卜问卦页
 // ============================================================================
 static void render_view_voice_listening(void) {
-    build_header(s_screen, "语音问事");
+    build_header(s_screen, "占卜问卦");
 
     lv_obj_t *card = lv_obj_create(s_screen);
     lv_obj_set_size(card, 216, 246);

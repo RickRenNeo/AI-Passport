@@ -426,9 +426,9 @@ static void voice_playback_task(void *pvParameters) {
         .url = full_audio_url,
         .method = HTTP_METHOD_GET,
         .timeout_ms = 15000,
-        .buffer_size = 1024,
+        .buffer_size = 2048,
         .buffer_size_tx = 1024,
-        .crt_bundle_attach = esp_crt_bundle_attach,
+        .crt_bundle_attach = (strncmp(full_audio_url, "https://", 8) == 0) ? esp_crt_bundle_attach : NULL,
     };
 
     esp_http_client_handle_t p_client = esp_http_client_init(&play_cfg);
@@ -442,12 +442,12 @@ static void voice_playback_task(void *pvParameters) {
 
     esp_err_t err = esp_http_client_open(p_client, 0);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "主域名音频拉取失败 (%s)，尝试回退至局域网直连拉取...", esp_err_to_name(err));
+        ESP_LOGW(TAG, "首选音频拉取失败 (%s)，尝试回退至备用地址...", esp_err_to_name(err));
         esp_http_client_cleanup(p_client);
 
-        snprintf(full_audio_url, sizeof(full_audio_url), "%s%s", TIANJI_GATEWAY_LAN_AUDIO_BASE, s_voice_audio_url);
+        snprintf(full_audio_url, sizeof(full_audio_url), "%s%s", TIANJI_GATEWAY_DOMAIN_AUDIO_BASE, s_voice_audio_url);
         play_cfg.url = full_audio_url;
-        play_cfg.crt_bundle_attach = NULL;
+        play_cfg.crt_bundle_attach = (strncmp(full_audio_url, "https://", 8) == 0) ? esp_crt_bundle_attach : NULL;
         p_client = esp_http_client_init(&play_cfg);
         if (p_client) {
             err = esp_http_client_open(p_client, 0);
@@ -516,7 +516,7 @@ static void voice_interaction_task(void *pvParameters) {
     s_voice_current_volume = 0;
 
     if (s_voice_callback) {
-        s_voice_callback(s_voice_state, "【天机倾听中...】");
+        s_voice_callback(s_voice_state, "【请说话...】");
     }
 
     const tianji_hexagram_t *prim = tianji_get_hexagram(s_voice_session_copy.primary_bits);
@@ -541,9 +541,9 @@ static void voice_interaction_task(void *pvParameters) {
         .url = target_url,
         .method = HTTP_METHOD_POST,
         .timeout_ms = TIANJI_GATEWAY_TIMEOUT_MS,
-        .buffer_size = 1024,
-        .buffer_size_tx = 1024,
-        .crt_bundle_attach = esp_crt_bundle_attach,
+        .buffer_size = 2048,
+        .buffer_size_tx = 2048,
+        .crt_bundle_attach = (strncmp(target_url, "https://", 8) == 0) ? esp_crt_bundle_attach : NULL,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&v_cfg);
@@ -558,20 +558,18 @@ static void voice_interaction_task(void *pvParameters) {
     }
 
     esp_http_client_set_header(client, "Content-Type", "multipart/form-data; boundary=" MULTIPART_BOUNDARY);
-    esp_http_client_set_header(client, "Transfer-Encoding", "chunked");
 
     esp_err_t err = esp_http_client_open(client, -1);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "主网关连接失败 (%s)，尝试回退至局域网直连地址: %s", esp_err_to_name(err), TIANJI_GATEWAY_LAN_URL);
+        ESP_LOGW(TAG, "首选网关连接失败 (%s)，尝试回退至备用域名: %s", esp_err_to_name(err), TIANJI_GATEWAY_DOMAIN_URL);
         esp_http_client_cleanup(client);
 
-        target_url = TIANJI_GATEWAY_LAN_URL;
+        target_url = TIANJI_GATEWAY_DOMAIN_URL;
         v_cfg.url = target_url;
-        v_cfg.crt_bundle_attach = NULL; // 局域网 http 不需要证书校验
+        v_cfg.crt_bundle_attach = (strncmp(target_url, "https://", 8) == 0) ? esp_crt_bundle_attach : NULL;
         client = esp_http_client_init(&v_cfg);
         if (client) {
             esp_http_client_set_header(client, "Content-Type", "multipart/form-data; boundary=" MULTIPART_BOUNDARY);
-            esp_http_client_set_header(client, "Transfer-Encoding", "chunked");
             err = esp_http_client_open(client, -1);
         }
     }
@@ -709,10 +707,10 @@ static void voice_interaction_task(void *pvParameters) {
     send_http_chunk(client, tail_part, tail_len);
     esp_http_client_write(client, "0\r\n\r\n", 5);
 
-    // 5. 切换到【神思审度中...】等待网关处理
+    // 5. 切换到【正在解卦...】等待网关处理
     s_voice_state = TIANJI_VOICE_STATE_UPLOADING;
     if (s_voice_callback) {
-        s_voice_callback(s_voice_state, "【神思审度中...】");
+        s_voice_callback(s_voice_state, "【正在解卦...】");
     }
 
     // 6. 接收并解析服务端 JSON 响应
