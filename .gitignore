@@ -15,6 +15,9 @@ managed_components/
 # Gateway and Python artifacts
 venv_gateway/
 server/audio_cache/
+server/*.log
+server/*.pid
 __pycache__/
 *.pyc
+
 
