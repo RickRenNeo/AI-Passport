@@ -11,3 +11,10 @@ managed_components/
 /.agents/skills/passport-build
 /.agents/skills/passport-device-test
 /.agents/skills/passport-debug
+
+# Gateway and Python artifacts
+venv_gateway/
+server/audio_cache/
+__pycache__/
+*.pyc
+
