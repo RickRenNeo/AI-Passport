@@ -33,13 +33,13 @@
 #define TIANJI_GATEWAY_DOMAIN_AUDIO_BASE "https://macminim4.tail20709.ts.net"
 #endif
 
-// 默认首选接入点
+// 默认首选接入点（按要求默认为公网 Tailscale 域名，支持外出随身随地推演）
 #ifndef TIANJI_GATEWAY_URL
-#define TIANJI_GATEWAY_URL            TIANJI_GATEWAY_LAN_URL
+#define TIANJI_GATEWAY_URL            TIANJI_GATEWAY_DOMAIN_URL
 #endif
 
 #ifndef TIANJI_GATEWAY_AUDIO_BASE
-#define TIANJI_GATEWAY_AUDIO_BASE     TIANJI_GATEWAY_LAN_AUDIO_BASE
+#define TIANJI_GATEWAY_AUDIO_BASE     TIANJI_GATEWAY_DOMAIN_AUDIO_BASE
 #endif
 
 // HTTP 超时时间（毫秒）

@@ -445,7 +445,9 @@ static void voice_playback_task(void *pvParameters) {
         ESP_LOGW(TAG, "首选音频拉取失败 (%s)，尝试回退至备用地址...", esp_err_to_name(err));
         esp_http_client_cleanup(p_client);
 
-        snprintf(full_audio_url, sizeof(full_audio_url), "%s%s", TIANJI_GATEWAY_DOMAIN_AUDIO_BASE, s_voice_audio_url);
+        const char *alt_base = (strcmp(TIANJI_GATEWAY_AUDIO_BASE, TIANJI_GATEWAY_DOMAIN_AUDIO_BASE) == 0) ?
+                               TIANJI_GATEWAY_LAN_AUDIO_BASE : TIANJI_GATEWAY_DOMAIN_AUDIO_BASE;
+        snprintf(full_audio_url, sizeof(full_audio_url), "%s%s", alt_base, s_voice_audio_url);
         play_cfg.url = full_audio_url;
         play_cfg.crt_bundle_attach = (strncmp(full_audio_url, "https://", 8) == 0) ? esp_crt_bundle_attach : NULL;
         p_client = esp_http_client_init(&play_cfg);
@@ -561,10 +563,12 @@ static void voice_interaction_task(void *pvParameters) {
 
     esp_err_t err = esp_http_client_open(client, -1);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "首选网关连接失败 (%s)，尝试回退至备用域名: %s", esp_err_to_name(err), TIANJI_GATEWAY_DOMAIN_URL);
+        const char *alt_url = (strcmp(target_url, TIANJI_GATEWAY_DOMAIN_URL) == 0) ?
+                              TIANJI_GATEWAY_LAN_URL : TIANJI_GATEWAY_DOMAIN_URL;
+        ESP_LOGW(TAG, "首选网关连接失败 (%s)，尝试回退至备用地址: %s", esp_err_to_name(err), alt_url);
         esp_http_client_cleanup(client);
 
-        target_url = TIANJI_GATEWAY_DOMAIN_URL;
+        target_url = alt_url;
         v_cfg.url = target_url;
         v_cfg.crt_bundle_attach = (strncmp(target_url, "https://", 8) == 0) ? esp_crt_bundle_attach : NULL;
         client = esp_http_client_init(&v_cfg);
