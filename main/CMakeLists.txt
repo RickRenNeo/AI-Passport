@@ -42,7 +42,6 @@ set(SOURCES
     # Board: FoloToy AI Passport & Common
     "boards/common/board.cc"
     "boards/common/wifi_board.cc"
-    "boards/common/adc_battery_monitor.cc"
     "boards/common/backlight.cc"
     "boards/common/button.cc"
     "boards/common/power_save_timer.cc"
