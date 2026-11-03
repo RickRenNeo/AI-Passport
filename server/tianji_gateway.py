@@ -177,7 +177,7 @@ def query_omlx_llm(
 
 async def generate_edge_tts_wav(text: str) -> tuple[Path, int]:
     """
-    通过 edge-tts 合成音频，并转换成 16kHz 16-bit 单声道 WAV 文件。
+    通过 edge-tts 合成音频，若外部网络受阻则无缝降级至 macOS 本地高速 TTS。
     返回 (wav_path, duration_ms)
     """
     file_id = f"{uuid.uuid4().hex}.wav"
@@ -185,7 +185,7 @@ async def generate_edge_tts_wav(text: str) -> tuple[Path, int]:
     temp_mp3_path = AUDIO_CACHE_DIR / f"{uuid.uuid4().hex}.mp3"
 
     try:
-        # 1. 使用 edge-tts 合成 mp3
+        # 1. 尝试使用 edge-tts 合成高质量国风语音
         communicate = edge_tts.Communicate(text, TTS_VOICE)
         await communicate.save(str(temp_mp3_path))
 
@@ -204,11 +204,41 @@ async def generate_edge_tts_wav(text: str) -> tuple[Path, int]:
         if proc.returncode != 0:
             raise RuntimeError(f"ffmpeg 转换音频失败: {stderr.decode('utf-8', errors='ignore')}")
 
-        # 3. 读取 WAV 计算时长 (ms)
         info = sf.info(str(output_wav_path))
         duration_ms = int(info.duration * 1000)
         return output_wav_path, duration_ms
 
+    except Exception as e:
+        logger.warning(f"Edge TTS 在线合成遇到网络波动 ({e})，立即无缝降级至本地语音合成引擎...")
+        temp_aiff_path = AUDIO_CACHE_DIR / f"{uuid.uuid4().hex}.aiff"
+        try:
+            # 使用本地 say 命令（无需外网，毫秒级响应）
+            clean_text = text.replace('"', '').replace("'", "")
+            say_cmd = ["say", "-v", "Tingting", clean_text, "-o", str(temp_aiff_path)]
+            say_proc = await asyncio.create_subprocess_exec(*say_cmd)
+            await say_proc.communicate()
+
+            cmd = [
+                "ffmpeg", "-y", "-i", str(temp_aiff_path),
+                "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
+                str(output_wav_path)
+            ]
+            ff_proc = await asyncio.create_subprocess_exec(*cmd)
+            await ff_proc.communicate()
+
+            info = sf.info(str(output_wav_path))
+            duration_ms = int(info.duration * 1000)
+            logger.info(f"本地 TTS 降级合成成功，时长={duration_ms}ms，路径={output_wav_path}")
+            return output_wav_path, duration_ms
+        except Exception as local_e:
+            logger.error(f"本地 TTS 合成亦失败: {local_e}")
+            raise
+        finally:
+            if temp_aiff_path.exists():
+                try:
+                    temp_aiff_path.unlink()
+                except Exception:
+                    pass
     finally:
         if temp_mp3_path.exists():
             try:
