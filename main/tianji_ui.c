@@ -805,13 +805,16 @@ void tianji_ui_handle_key(tianji_key_action_t action) {
         break;
 
     case TIANJI_VIEW_OVERVIEW:
-        if (action == TIANJI_KEY_OK_CLICK && tianji_net_is_enabled()) {
-            // 联机模式下单按确定键：切入【请说话】启动语音解卦
+        if (action == TIANJI_KEY_OK_CLICK) {
+            // 单按确定键：确保网络使能，切入【占卜问卦】启动语音解卦
+            if (!tianji_net_is_enabled()) {
+                tianji_net_set_enabled(true);
+            }
             s_current_view = TIANJI_VIEW_VOICE_LISTENING;
             tianji_audio_play(TIANJI_SFX_START);
             refresh_view();
             tianji_voice_start(&s_session, on_voice_status_update);
-        } else if (action == TIANJI_KEY_DOWN_CLICK || action == TIANJI_KEY_OK_CLICK) {
+        } else if (action == TIANJI_KEY_DOWN_CLICK) {
             s_current_view = TIANJI_VIEW_READING;
             s_reading_page = 0;
             tianji_audio_play(TIANJI_SFX_PAGE_FLIP);

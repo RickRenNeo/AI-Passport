@@ -140,6 +140,7 @@ void tianji_net_set_enabled(bool enable) {
 
         esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
         esp_wifi_start();
+        esp_wifi_set_ps(WIFI_PS_NONE); // 禁用调制解调器休眠，彻底避免与手机热点连接中断或断连
     } else {
         ESP_LOGI(TAG, "切换为本地离线模式，关闭 Wi-Fi 释放系统资源...");
         esp_wifi_stop();
@@ -152,6 +153,14 @@ bool tianji_net_is_enabled(void) {
 }
 
 bool tianji_net_is_connected(void) {
+    if (s_sta_netif) {
+        esp_netif_ip_info_t ip_info;
+        if (esp_netif_get_ip_info(s_sta_netif, &ip_info) == ESP_OK) {
+            if (ip_info.ip.addr != 0) {
+                return true;
+            }
+        }
+    }
     return s_net_state == TIANJI_NET_STATE_CONNECTED ||
            s_net_state == TIANJI_NET_STATE_SUCCESS;
 }
@@ -526,9 +535,12 @@ static void voice_interaction_task(void *pvParameters) {
         s_voice_callback(s_voice_state, "【请说话...】");
     }
 
-    // 0. 前置网络就绪检查（若热点在握手中，最多等待 3.0 秒）
+    // 0. 前置网络就绪检查（若热点在握手中，最多等待 5.0 秒并主动触发重连）
     int wait_net_cnt = 0;
-    while (!tianji_net_is_connected() && wait_net_cnt < 30) {
+    while (!tianji_net_is_connected() && wait_net_cnt < 50) {
+        if (wait_net_cnt % 10 == 0 && s_net_enabled) {
+            esp_wifi_connect();
+        }
         vTaskDelay(pdMS_TO_TICKS(100));
         wait_net_cnt++;
     }
@@ -536,7 +548,7 @@ static void voice_interaction_task(void *pvParameters) {
         ESP_LOGE(TAG, "Wi-Fi 热点未连通，无法发起语音解卦");
         s_voice_state = TIANJI_VOICE_STATE_ERROR;
         snprintf(s_voice_text_reply, sizeof(s_voice_text_reply),
-            "热点未连接\n\n请确认手机热点「%s」已开启，连接成功后按确定键重试。",
+            "未连接至手机热点「%s」\n\n请确认手机个人热点已开启。按确定键可重试。",
             TIANJI_WIFI_SSID);
         if (s_voice_callback) s_voice_callback(s_voice_state, s_voice_text_reply);
         s_voice_task_handle = NULL;
@@ -665,17 +677,37 @@ static void voice_interaction_task(void *pvParameters) {
         return;
     }
 
+    int64_t rec_start_time_us = esp_timer_get_time();
+    int64_t last_speech_time_us = 0;
+    bool user_started_speaking = false;
+    uint32_t consecutive_speech_frames = 0;
     uint32_t total_chunks = 0;
-    uint32_t speech_chunks = 0;
-    uint32_t trailing_silence = 0;
-    const uint32_t MAX_CHUNKS = 250;            // 8.0 秒上限 (250 * 32ms)
-    const uint32_t TIMEOUT_5S_CHUNKS = 156;     // 5.0 秒刻度 (156 * 32ms ≈ 5.0s)
-    const uint32_t TRAILING_SILENCE_LIMIT = 78; // 说话后停顿 2.5 秒自动截止 (78 * 32ms ≈ 2.5s)
-    const int SPEECH_ACTIVE_RMS = 850;           // 明确说话的高能量阈值
+    const int SPEECH_ACTIVE_RMS = 950; // 人声发音高能量门槛
 
-    ESP_LOGI(TAG, "麦克风采集已开启，请对准设备陈述求测之事...");
+    ESP_LOGI(TAG, "麦克风采集已开启，硬件秒表计时开始，对准设备陈述求测之事...");
 
-    while (!s_voice_stop_recording_flag && total_chunks < MAX_CHUNKS) {
+    while (!s_voice_stop_recording_flag) {
+        int64_t now_us = esp_timer_get_time();
+        int64_t elapsed_ms = (now_us - rec_start_time_us) / 1000;
+
+        // 【保底规则 1】物理时间满 8.0 秒，强制截止
+        if (elapsed_ms >= 8000) {
+            ESP_LOGI(TAG, "已达最大允许录音时长 (8.0 秒)，自动结束");
+            break;
+        }
+
+        // 【核心规则 2】若从未检测到有效人声说话，物理时间满 5.0 秒坚决 100% 自动截止！
+        if (!user_started_speaking && elapsed_ms >= 5000) {
+            ESP_LOGI(TAG, "静音满 5.0 秒 (物理用时 %lld ms)，坚决自动结束录音", (long long)elapsed_ms);
+            break;
+        }
+
+        // 【核心规则 3】若已开始说话，说话完毕后停顿满 2.0 秒，自动截止
+        if (user_started_speaking && (now_us - last_speech_time_us) >= 2000000LL) {
+            ESP_LOGI(TAG, "说话后停顿满 2.0 秒，自动结束录音");
+            break;
+        }
+
         esp_err_t r_err = bsp_audio_read(rec_buf, 1024);
         if (r_err != ESP_OK) {
             vTaskDelay(pdMS_TO_TICKS(10));
@@ -699,12 +731,15 @@ static void voice_interaction_task(void *pvParameters) {
         int vol = (rms > 6000) ? 100 : (rms * 100 / 6000);
         s_voice_current_volume = vol;
 
-        // 真实语音发声判定
+        // 真实语音发声判定：需连续 3 帧（约 100ms）以上高于门槛，排除偶发脉冲干扰
         if (rms >= SPEECH_ACTIVE_RMS) {
-            speech_chunks++;
-            trailing_silence = 0;
+            consecutive_speech_frames++;
+            if (consecutive_speech_frames >= 3) {
+                user_started_speaking = true;
+                last_speech_time_us = esp_timer_get_time();
+            }
         } else {
-            trailing_silence++;
+            consecutive_speech_frames = 0;
         }
 
         // 边录边发一个 chunk
@@ -713,25 +748,14 @@ static void voice_interaction_task(void *pvParameters) {
             break;
         }
         total_chunks++;
-
-        // 规则 1：前 5.0 秒内未检测到有效发音（累计语音帧 < 8 帧，即小于 250ms），坚决准时自动截止
-        if (total_chunks >= TIMEOUT_5S_CHUNKS && speech_chunks < 8) {
-            ESP_LOGI(TAG, "连续 5 秒未检测到有效发声 (发音帧: %lu)，坚决自动结束录音", (unsigned long)speech_chunks);
-            break;
-        }
-
-        // 规则 2：已经开口说话（发音帧 >= 8），且说话后尾随停顿达 2.5 秒，自动截止
-        if (speech_chunks >= 8 && trailing_silence >= TRAILING_SILENCE_LIMIT) {
-            ESP_LOGI(TAG, "说话后停顿超过 2.5 秒，自动结束录音");
-            break;
-        }
     }
 
     free(rec_buf);
     s_voice_current_volume = 0;
 
-    ESP_LOGI(TAG, "录音结束，共采集发送 %lu 块 (约 %.2f 秒，发音帧: %lu)",
-             (unsigned long)total_chunks, total_chunks * 0.032f, (unsigned long)speech_chunks);
+    int64_t final_dur_ms = (esp_timer_get_time() - rec_start_time_us) / 1000;
+    ESP_LOGI(TAG, "录音结束，共采集发送 %lu 块 (物理耗时 %lld ms，开口说话: %s)",
+             (unsigned long)total_chunks, (long long)final_dur_ms, user_started_speaking ? "是" : "否");
 
     // 4. 发送 multipart 尾部及 HTTP 最终终止 chunk (0\r\n\r\n)
     char tail_part[128];
