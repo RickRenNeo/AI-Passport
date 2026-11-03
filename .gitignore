@@ -17,6 +17,8 @@ venv_gateway/
 server/audio_cache/
 server/*.log
 server/*.pid
+server/*.wav
+build_artifacts/
 __pycache__/
 *.pyc
 
