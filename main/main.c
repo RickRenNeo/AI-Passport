@@ -158,8 +158,9 @@ void app_main(void) {
         xTaskCreate(battery_monitor_task, "tianji_bat", 2048, NULL, 1, NULL);
     }
 
-    // 6. 初始化网络底座
+    // 6. 初始化网络底座并默认启动 Wi-Fi 自动联网（随时待命进行占卜问卦）
     tianji_net_init();
+    tianji_net_set_enabled(true);
 
     // 7. 载入《天机·六爻》极简现代科技风 UI
     if (bsp_lvgl_lock(200)) {

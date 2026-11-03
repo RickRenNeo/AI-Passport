@@ -44,6 +44,9 @@ void tianji_net_set_enabled(bool enable);
 // 获取当前是否处于联机模式
 bool tianji_net_is_enabled(void);
 
+// 获取当前 Wi-Fi 是否已成功获取 IP 连接就绪
+bool tianji_net_is_connected(void);
+
 // 获取当前网络状态
 tianji_net_state_t tianji_net_get_state(void);
 

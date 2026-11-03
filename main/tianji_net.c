@@ -151,6 +151,11 @@ bool tianji_net_is_enabled(void) {
     return s_net_enabled;
 }
 
+bool tianji_net_is_connected(void) {
+    return s_net_state == TIANJI_NET_STATE_CONNECTED ||
+           s_net_state == TIANJI_NET_STATE_SUCCESS;
+}
+
 tianji_net_state_t tianji_net_get_state(void) {
     return s_net_state;
 }
@@ -521,6 +526,24 @@ static void voice_interaction_task(void *pvParameters) {
         s_voice_callback(s_voice_state, "【请说话...】");
     }
 
+    // 0. 前置网络就绪检查（若热点在握手中，最多等待 3.0 秒）
+    int wait_net_cnt = 0;
+    while (!tianji_net_is_connected() && wait_net_cnt < 30) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        wait_net_cnt++;
+    }
+    if (!tianji_net_is_connected()) {
+        ESP_LOGE(TAG, "Wi-Fi 热点未连通，无法发起语音解卦");
+        s_voice_state = TIANJI_VOICE_STATE_ERROR;
+        snprintf(s_voice_text_reply, sizeof(s_voice_text_reply),
+            "热点未连接\n\n请确认手机热点「%s」已开启，连接成功后按确定键重试。",
+            TIANJI_WIFI_SSID);
+        if (s_voice_callback) s_voice_callback(s_voice_state, s_voice_text_reply);
+        s_voice_task_handle = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
     const tianji_hexagram_t *prim = tianji_get_hexagram(s_voice_session_copy.primary_bits);
     const tianji_hexagram_t *trans = tianji_get_hexagram(s_voice_session_copy.transformed_bits);
 
@@ -537,7 +560,6 @@ static void voice_interaction_task(void *pvParameters) {
     }
 
     // 1. 初始化 HTTP 客户端并开启 Chunked 流式 POST
-    // 优先尝试主网关地址，若失败自动回退尝试局域网直连地址
     const char *target_url = TIANJI_GATEWAY_URL;
     esp_http_client_config_t v_cfg = {
         .url = target_url,
@@ -560,6 +582,7 @@ static void voice_interaction_task(void *pvParameters) {
     }
 
     esp_http_client_set_header(client, "Content-Type", "multipart/form-data; boundary=" MULTIPART_BOUNDARY);
+    esp_http_client_set_header(client, "Transfer-Encoding", "chunked");
 
     esp_err_t err = esp_http_client_open(client, -1);
     if (err != ESP_OK) {
@@ -574,6 +597,7 @@ static void voice_interaction_task(void *pvParameters) {
         client = esp_http_client_init(&v_cfg);
         if (client) {
             esp_http_client_set_header(client, "Content-Type", "multipart/form-data; boundary=" MULTIPART_BOUNDARY);
+            esp_http_client_set_header(client, "Transfer-Encoding", "chunked");
             err = esp_http_client_open(client, -1);
         }
     }
@@ -582,7 +606,9 @@ static void voice_interaction_task(void *pvParameters) {
         ESP_LOGE(TAG, "打开网关 HTTP 连接最终失败: %s", esp_err_to_name(err));
         if (client) esp_http_client_cleanup(client);
         s_voice_state = TIANJI_VOICE_STATE_ERROR;
-        snprintf(s_voice_text_reply, sizeof(s_voice_text_reply), "无法连通语音网关，请确认手机热点已连接。");
+        snprintf(s_voice_text_reply, sizeof(s_voice_text_reply),
+            "无法连通解卦服务\n\n请确认手机热点「%s」正常并已连通互联网。按确定键重试。",
+            TIANJI_WIFI_SSID);
         if (s_voice_callback) s_voice_callback(s_voice_state, s_voice_text_reply);
         s_voice_task_handle = NULL;
         vTaskDelete(NULL);
@@ -608,7 +634,7 @@ static void voice_interaction_task(void *pvParameters) {
 
     send_http_chunk(client, meta_part, meta_len);
 
-    // 发送标准 44 字节 WAV 头（声明 16kHz 16-bit 单声道 PCM）
+    // 发送标准 44 字节 WAV 头部（声明 16kHz 16-bit 单声道 PCM）
     wav_header_t wav_hdr = {
         .riff = {'R', 'I', 'F', 'F'},
         .overall_size = 0x7FFFFFFF, // chunked 流式传输使用最大占位
@@ -640,12 +666,12 @@ static void voice_interaction_task(void *pvParameters) {
     }
 
     uint32_t total_chunks = 0;
-    uint32_t silence_chunks = 0;
-    bool has_spoken = false;
-    const uint32_t MAX_CHUNKS = 250;       // 8.0 秒上限 (250 * 32ms)
-    const uint32_t INITIAL_SILENCE_LIMIT = 156; // 开始录音后5.0秒未说话自动截止
-    const uint32_t TAIL_SILENCE_LIMIT = 110;    // 说话后停顿3.5秒自动截止
-    const int VOICE_ACTIVE_RMS = 500;           // 语音激活RMS阈值
+    uint32_t speech_chunks = 0;
+    uint32_t trailing_silence = 0;
+    const uint32_t MAX_CHUNKS = 250;            // 8.0 秒上限 (250 * 32ms)
+    const uint32_t TIMEOUT_5S_CHUNKS = 156;     // 5.0 秒刻度 (156 * 32ms ≈ 5.0s)
+    const uint32_t TRAILING_SILENCE_LIMIT = 78; // 说话后停顿 2.5 秒自动截止 (78 * 32ms ≈ 2.5s)
+    const int SPEECH_ACTIVE_RMS = 850;           // 明确说话的高能量阈值
 
     ESP_LOGI(TAG, "麦克风采集已开启，请对准设备陈述求测之事...");
 
@@ -673,12 +699,12 @@ static void voice_interaction_task(void *pvParameters) {
         int vol = (rms > 6000) ? 100 : (rms * 100 / 6000);
         s_voice_current_volume = vol;
 
-        // 语音活动与静音计数判定
-        if (rms >= VOICE_ACTIVE_RMS) {
-            has_spoken = true;
-            silence_chunks = 0;
+        // 真实语音发声判定
+        if (rms >= SPEECH_ACTIVE_RMS) {
+            speech_chunks++;
+            trailing_silence = 0;
         } else {
-            silence_chunks++;
+            trailing_silence++;
         }
 
         // 边录边发一个 chunk
@@ -688,14 +714,15 @@ static void voice_interaction_task(void *pvParameters) {
         }
         total_chunks++;
 
-        // 1. 若 5 秒整未检测到有效说话，自动截止
-        if (!has_spoken && total_chunks >= INITIAL_SILENCE_LIMIT) {
-            ESP_LOGI(TAG, "连续 5 秒未检测到说话声音，自动结束录音");
+        // 规则 1：前 5.0 秒内未检测到有效发音（累计语音帧 < 8 帧，即小于 250ms），坚决准时自动截止
+        if (total_chunks >= TIMEOUT_5S_CHUNKS && speech_chunks < 8) {
+            ESP_LOGI(TAG, "连续 5 秒未检测到有效发声 (发音帧: %lu)，坚决自动结束录音", (unsigned long)speech_chunks);
             break;
         }
-        // 2. 若开口说话后尾随停顿达 3.5 秒，自动截止
-        if (has_spoken && silence_chunks >= TAIL_SILENCE_LIMIT) {
-            ESP_LOGI(TAG, "说话后停顿超过 3.5 秒，自动结束录音");
+
+        // 规则 2：已经开口说话（发音帧 >= 8），且说话后尾随停顿达 2.5 秒，自动截止
+        if (speech_chunks >= 8 && trailing_silence >= TRAILING_SILENCE_LIMIT) {
+            ESP_LOGI(TAG, "说话后停顿超过 2.5 秒，自动结束录音");
             break;
         }
     }
@@ -703,7 +730,8 @@ static void voice_interaction_task(void *pvParameters) {
     free(rec_buf);
     s_voice_current_volume = 0;
 
-    ESP_LOGI(TAG, "录音结束，共采集发送 %lu 块 (约 %.2f 秒)", (unsigned long)total_chunks, total_chunks * 0.032f);
+    ESP_LOGI(TAG, "录音结束，共采集发送 %lu 块 (约 %.2f 秒，发音帧: %lu)",
+             (unsigned long)total_chunks, total_chunks * 0.032f, (unsigned long)speech_chunks);
 
     // 4. 发送 multipart 尾部及 HTTP 最终终止 chunk (0\r\n\r\n)
     char tail_part[128];
@@ -725,7 +753,14 @@ static void voice_interaction_task(void *pvParameters) {
     if (status_code != 200) {
         esp_http_client_cleanup(client);
         s_voice_state = TIANJI_VOICE_STATE_ERROR;
-        snprintf(s_voice_text_reply, sizeof(s_voice_text_reply), "网关服务异常 (HTTP %d)，请稍后重试。", status_code);
+        if (status_code < 0) {
+            snprintf(s_voice_text_reply, sizeof(s_voice_text_reply),
+                "网络请求超时或中断\n\n请确认手机热点「%s」正常并已连通互联网。按确定键可重试。",
+                TIANJI_WIFI_SSID);
+        } else {
+            snprintf(s_voice_text_reply, sizeof(s_voice_text_reply),
+                "网关服务异常 (HTTP %d)\n\n请稍后重试。", status_code);
+        }
         if (s_voice_callback) s_voice_callback(s_voice_state, s_voice_text_reply);
         s_voice_task_handle = NULL;
         vTaskDelete(NULL);
@@ -819,6 +854,6 @@ esp_err_t tianji_voice_start(const tianji_session_t *session, tianji_voice_callb
     s_voice_session_copy = *session;
     s_voice_callback = cb;
 
-    BaseType_t ret = xTaskCreate(voice_interaction_task, "tianji_voice", 6144, NULL, 5, &s_voice_task_handle);
+    BaseType_t ret = xTaskCreate(voice_interaction_task, "tianji_voice", 10240, NULL, 5, &s_voice_task_handle);
     return (ret == pdPASS) ? ESP_OK : ESP_ERR_NO_MEM;
 }
