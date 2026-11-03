@@ -525,7 +525,25 @@ static void render_view_voice_listening(void) {
 
     tianji_voice_state_t st = tianji_voice_get_state();
 
-    if (st == TIANJI_VOICE_STATE_UPLOADING) {
+    if (st == TIANJI_VOICE_STATE_CONNECTING) {
+        lv_obj_t *title = lv_label_create(card);
+        lv_obj_set_style_text_font(title, &tianji_font_16, 0);
+        lv_obj_set_style_text_color(title, lv_color_hex(COLOR_CYAN), 0);
+        lv_label_set_text(title, "【正在连通...】");
+        lv_obj_set_pos(title, 0, 0);
+
+        lv_obj_t *desc = lv_label_create(card);
+        lv_obj_set_style_text_font(desc, &tianji_font_16, 0);
+        lv_obj_set_style_text_color(desc, lv_color_hex(COLOR_WHITE), 0);
+        lv_obj_set_width(desc, 192);
+        lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(desc,
+            "正在连通天机算力网络……\n\n"
+            "待提示音响起后，请对准设备说话。");
+        lv_obj_set_pos(desc, 0, 32);
+
+        build_footer(s_screen, "正在建立连接，请稍候");
+    } else if (st == TIANJI_VOICE_STATE_UPLOADING) {
         // 原“神思审度中……”改版为简明沉稳的“正在解卦...”
         lv_obj_t *title = lv_label_create(card);
         lv_obj_set_style_text_font(title, &tianji_font_16, 0);
@@ -693,7 +711,10 @@ static void render_view_ai(void) {
 static void on_voice_status_update(tianji_voice_state_t state, const char *msg) {
     (void)msg;
     if (bsp_lvgl_lock(100)) {
-        if (state == TIANJI_VOICE_STATE_NEED_MORE) {
+        if (state == TIANJI_VOICE_STATE_RECORDING) {
+            // 当网络握手打通，正式进入录音状态时，播放短促清脆就绪提示音！
+            tianji_audio_play(TIANJI_SFX_START);
+        } else if (state == TIANJI_VOICE_STATE_NEED_MORE) {
             s_current_view = TIANJI_VIEW_VOICE_RETRY;
             tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
         } else if (state == TIANJI_VOICE_STATE_SUCCESS) {

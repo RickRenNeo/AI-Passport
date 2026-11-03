@@ -127,7 +127,7 @@ def check_intent_validity(text: str) -> bool:
     return True
 
 NEED_MORE_INFO_PROMPT = (
-    "卦无妄动，意在诚敬。所言未明心中所求，请指明欲测之事（如求财、事业、姻缘等），凝神后再禀。"
+    "心诚则灵。请指明所测之事，如求财或事业，再向天机垂问。"
 )
 
 def query_omlx_llm(

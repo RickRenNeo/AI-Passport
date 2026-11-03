@@ -51,11 +51,6 @@ static volatile int s_voice_current_volume = 0;
 static char s_voice_text_reply[AI_RESULT_BUF_SIZE] = {0};
 static char s_voice_audio_url[256] = {0};
 
-// 录音环形缓冲管道（零延迟麦克风采集与并发网络突发传输架构）
-static RingbufHandle_t s_rec_ringbuf = NULL;
-static volatile bool s_rec_producer_done = false;
-static TaskHandle_t s_record_producer_task_handle = NULL;
-
 #pragma pack(push, 1)
 typedef struct {
     char riff[4];              // "RIFF"
@@ -446,38 +441,48 @@ typedef struct {
     volatile bool stop_flag;
 } playback_pipe_t;
 
-// 扬声器硬件消费任务：以恒定速度从环形缓冲提取 PCM 喂给硬件 Codec
+// 扬声器硬件消费任务：以恒定速度从环形缓冲提取 PCM 喂给硬件 Codec（优先级低于网络拉取，主动 yield 避免 CPU 饥饿）
 static void audio_speaker_consumer_task(void *pvParameters) {
     playback_pipe_t *pipe = (playback_pipe_t *)pvParameters;
     bsp_audio_set_format(16000, 16, 1);
     bsp_audio_set_volume(90);
 
-    // 预缓冲等待：等待缓冲区积攒至少 6144 字节（约 200ms）或者网络已提前下发完毕
+    // 预缓冲等待：等待缓冲区积攒至少 12288 字节（约 384ms 音频）或者网络已提前全部下发完毕
     while (!pipe->stop_flag && !pipe->fetch_done) {
         size_t cur_size = 0;
         vRingbufferGetInfo(pipe->ringbuf, NULL, NULL, NULL, NULL, &cur_size);
-        if (cur_size >= 6144) break;
+        if (cur_size >= 12288) break;
         vTaskDelay(pdMS_TO_TICKS(15));
     }
 
-    ESP_LOGI(TAG, "预防水位已就绪，扬声器平滑连续回放启动...");
+    ESP_LOGI(TAG, "预防水位已就绪，扬声器连续平滑回放启动...");
 
     while (!pipe->stop_flag) {
         size_t item_size = 0;
-        void *pcm_data = xRingbufferReceiveUpTo(pipe->ringbuf, &item_size, pdMS_TO_TICKS(50), 2048);
+        void *pcm_data = xRingbufferReceiveUpTo(pipe->ringbuf, &item_size, pdMS_TO_TICKS(40), 2048);
         if (pcm_data) {
             bsp_audio_write(pcm_data, item_size);
             vRingbufferReturnItem(pipe->ringbuf, pcm_data);
+            // 关键：主动让出 CPU 2ms，确保单核 ESP32-C3 下网络拉取与 TLS 解密获得充足时间片！
+            vTaskDelay(pdMS_TO_TICKS(2));
         } else if (pipe->fetch_done) {
             // 网络已下载完毕且缓冲区已全部排空
             break;
+        } else {
+            // 发生 Buffer Underflow（网络偶发抖动断流）：重新蓄水到至少 8192 字节再继续，严禁高频跳字！
+            while (!pipe->stop_flag && !pipe->fetch_done) {
+                size_t cur_size = 0;
+                vRingbufferGetInfo(pipe->ringbuf, NULL, NULL, NULL, NULL, &cur_size);
+                if (cur_size >= 8192) break;
+                vTaskDelay(pdMS_TO_TICKS(15));
+            }
         }
     }
 
     vTaskDelete(NULL);
 }
 
-// 宗师语音流式拉取后台任务（充当生产者，持续从网络填满 16KB 环形缓冲）
+// 宗师语音流式拉取后台任务（充当生产者，持续从网络填满 24KB 环形缓冲，优先级 5）
 static void voice_playback_task(void *pvParameters) {
     (void)pvParameters;
     s_voice_state = TIANJI_VOICE_STATE_PLAYING;
@@ -554,10 +559,10 @@ static void voice_playback_task(void *pvParameters) {
         head_read += r;
     }
 
-    // 2. 创建 16KB 字节环形缓冲区并启动扬声器消费任务
-    RingbufHandle_t play_rb = xRingbufferCreate(16384, RINGBUF_TYPE_BYTEBUF);
+    // 2. 创建 24KB 字节环形缓冲区并启动扬声器消费任务（优先级 4，低于拉取任务优先级 5）
+    RingbufHandle_t play_rb = xRingbufferCreate(24576, RINGBUF_TYPE_BYTEBUF);
     if (!play_rb) {
-        ESP_LOGE(TAG, "无法分配 16KB 播放环形缓冲区");
+        ESP_LOGE(TAG, "无法分配播放环形缓冲区");
         esp_http_client_cleanup(p_client);
         s_voice_state = TIANJI_VOICE_STATE_IDLE;
         s_playback_task_handle = NULL;
@@ -572,7 +577,7 @@ static void voice_playback_task(void *pvParameters) {
     };
 
     TaskHandle_t consumer_handle = NULL;
-    xTaskCreate(audio_speaker_consumer_task, "spk_out", 3072, &pipe, 6, &consumer_handle);
+    xTaskCreate(audio_speaker_consumer_task, "spk_out", 3072, &pipe, 4, &consumer_handle);
 
     // 3. 网络拉取循环：以 2KB 块持续读取并填入环形缓冲
     uint8_t *net_chunk = malloc(2048);
@@ -582,7 +587,6 @@ static void voice_playback_task(void *pvParameters) {
             if (r <= 0) {
                 break; // 网络流传输完成
             }
-            // 压入环形缓冲，超时等待最多 1.5 秒（当扬声器消费较慢时背压等待）
             if (xRingbufferSend(play_rb, net_chunk, (size_t)r, pdMS_TO_TICKS(1500)) != pdTRUE) {
                 ESP_LOGW(TAG, "环形缓冲积压超时");
             }
@@ -599,7 +603,7 @@ static void voice_playback_task(void *pvParameters) {
             pipe.stop_flag = true;
             break;
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(40));
     }
 
     vRingbufferDelete(play_rb);
@@ -609,134 +613,20 @@ static void voice_playback_task(void *pvParameters) {
     vTaskDelete(NULL);
 }
 
-// 录音生产者任务：零延迟即刻采集麦克风数据并灌入环形缓冲区，同步更新实时音量与断句检测
-static void audio_record_producer_task(void *pvParameters) {
-    (void)pvParameters;
-    bsp_audio_set_format(16000, 16, 1);
-
-    uint8_t *rec_buf = malloc(1024);
-    if (!rec_buf) {
-        ESP_LOGE(TAG, "无法分配录音生产者缓冲区");
-        s_rec_producer_done = true;
-        s_record_producer_task_handle = NULL;
-        vTaskDelete(NULL);
-        return;
-    }
-
-    int64_t rec_start_time_us = esp_timer_get_time();
-    s_voice_rec_start_us = rec_start_time_us;
-    int64_t last_speech_time_us = 0;
-    bool user_started_speaking = false;
-    uint32_t consecutive_speech_frames = 0;
-    uint32_t total_captured_chunks = 0;
-    const int SPEECH_ACTIVE_RMS = 280; // 人声发声真实门槛
-
-    ESP_LOGI(TAG, "【零延迟麦克风已启动】开始实时采音入环形缓冲，随时接收求测语音...");
-
-    while (!s_voice_stop_recording_flag) {
-        int64_t now_us = esp_timer_get_time();
-        int64_t elapsed_ms = (now_us - rec_start_time_us) / 1000;
-
-        // 【保底规则 1】物理时间满 8.0 秒，强制截止
-        if (elapsed_ms >= 8000) {
-            ESP_LOGI(TAG, "已达最大允许录音时长 (8.0 秒)，自动结束录音");
-            break;
-        }
-
-        // 【核心规则 2】若从未检测到有效人声说话，物理时间满 5.0 秒坚决 100% 自动截止！
-        if (!user_started_speaking && elapsed_ms >= 5000) {
-            ESP_LOGI(TAG, "静音满 5.0 秒 (物理用时 %lld ms)，坚决自动结束录音", (long long)elapsed_ms);
-            break;
-        }
-
-        // 【核心规则 3】若已开始说话，说话完毕后停顿满 2.8 秒，且总录音时长满 2.5 秒，自动截止
-        if (user_started_speaking && elapsed_ms >= 2500 && (now_us - last_speech_time_us) >= 2800000LL) {
-            ESP_LOGI(TAG, "说话后停顿满 2.8 秒 (总用时 %lld ms)，自动结束录音", (long long)elapsed_ms);
-            break;
-        }
-
-        esp_err_t r_err = bsp_audio_read(rec_buf, 1024);
-        if (r_err != ESP_OK) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
-
-        // 计算 RMS 能量与音量指示
-        int16_t *samples = (int16_t *)rec_buf;
-        int64_t mean_sum = 0;
-        for (int i = 0; i < 512; i++) {
-            mean_sum += samples[i];
-        }
-        int16_t mean_val = (int16_t)(mean_sum / 512);
-
-        int64_t ac_sum_sq = 0;
-        for (int i = 0; i < 512; i++) {
-            int32_t diff = samples[i] - mean_val;
-            ac_sum_sq += diff * diff;
-        }
-        int rms = (int)sqrt((double)ac_sum_sq / 512.0);
-        int vol = (rms > 6000) ? 100 : (rms * 100 / 6000);
-        s_voice_current_volume = vol;
-
-        // 真实语音发声判定
-        if (rms >= SPEECH_ACTIVE_RMS) {
-            consecutive_speech_frames++;
-            if (consecutive_speech_frames >= 2) {
-                user_started_speaking = true;
-                last_speech_time_us = esp_timer_get_time();
-            }
-        } else {
-            consecutive_speech_frames = 0;
-        }
-
-        // 压入环形缓冲区，供网络上传任务消费（若暂时积满，等待最多 50ms）
-        if (s_rec_ringbuf) {
-            if (xRingbufferSend(s_rec_ringbuf, rec_buf, 1024, pdMS_TO_TICKS(50)) != pdTRUE) {
-                ESP_LOGW(TAG, "环形缓冲积满，等待网络消费");
-            }
-        }
-        total_captured_chunks++;
-    }
-
-    free(rec_buf);
-    s_voice_current_volume = 0;
-    s_rec_producer_done = true;
-
-    int64_t final_dur_ms = (esp_timer_get_time() - rec_start_time_us) / 1000;
-    ESP_LOGI(TAG, "录音采集阶段完成，共入队 %lu 块 (用时 %lld ms，开口说话: %s)",
-             (unsigned long)total_captured_chunks, (long long)final_dur_ms, user_started_speaking ? "是" : "否");
-
-    s_record_producer_task_handle = NULL;
-    vTaskDelete(NULL);
-}
-
-// 语音交互核心网络任务：并行网络握手 -> 从 RingBuffer 突发并流式上传 -> 解析响应 -> 触发播放
+// 语音交互核心网络任务：网络真就绪 -> 就绪音与UI切换 -> 实时麦克风流式直传网关 -> 解析响应 -> 触发播放
 static void voice_interaction_task(void *pvParameters) {
     (void)pvParameters;
 
-    s_voice_state = TIANJI_VOICE_STATE_RECORDING;
+    s_voice_state = TIANJI_VOICE_STATE_CONNECTING;
     s_voice_stop_recording_flag = false;
     s_voice_current_volume = 0;
-    s_rec_producer_done = false;
 
-    // 1. 初始化 48KB 录音环形缓冲区（可缓冲约 1.5 秒音频，足够承载 TLS 握手延时）
-    if (s_rec_ringbuf) {
-        vRingbufferDelete(s_rec_ringbuf);
-        s_rec_ringbuf = NULL;
-    }
-    s_rec_ringbuf = xRingbufferCreate(49152, RINGBUF_TYPE_BYTEBUF);
-    if (!s_rec_ringbuf) {
-        s_rec_ringbuf = xRingbufferCreate(32768, RINGBUF_TYPE_BYTEBUF);
-    }
-
-    // 2. 毫秒级即刻启动麦克风采集任务（零丢失架构，类似小智 AI 流水线设计）
-    xTaskCreate(audio_record_producer_task, "rec_prod", 3584, NULL, 6, &s_record_producer_task_handle);
-
+    // 1. 界面呈现【正在连通...】，避免用户在握手时盲目说话
     if (s_voice_callback) {
-        s_voice_callback(s_voice_state, "【请说话...】");
+        s_voice_callback(s_voice_state, "【正在连通...】");
     }
 
-    // 3. 前置网络就绪检查（若热点在握手中，最多等待 5.0 秒并主动触发重连）
+    // 2. 前置网络就绪检查（若热点在握手中，最多等待 5.0 秒并主动触发重连）
     int wait_net_cnt = 0;
     while (!tianji_net_is_connected() && wait_net_cnt < 50) {
         if (wait_net_cnt % 10 == 0 && s_net_enabled) {
@@ -747,14 +637,6 @@ static void voice_interaction_task(void *pvParameters) {
     }
     if (!tianji_net_is_connected()) {
         ESP_LOGE(TAG, "Wi-Fi 热点未连通，无法发起语音解卦");
-        s_voice_stop_recording_flag = true;
-        while (s_record_producer_task_handle != NULL && eTaskGetState(s_record_producer_task_handle) != eDeleted) {
-            vTaskDelay(pdMS_TO_TICKS(15));
-        }
-        if (s_rec_ringbuf) {
-            vRingbufferDelete(s_rec_ringbuf);
-            s_rec_ringbuf = NULL;
-        }
         s_voice_state = TIANJI_VOICE_STATE_ERROR;
         snprintf(s_voice_text_reply, sizeof(s_voice_text_reply),
             "未连接至手机热点「%s」\n\n请确认手机个人热点已开启。按确定键可重试。",
@@ -780,9 +662,9 @@ static void voice_interaction_task(void *pvParameters) {
         }
     }
 
-    // 4. 初始化 HTTP 客户端并开启 Chunked 流式 POST
+    // 3. 初始化 HTTP 客户端并开启 Chunked 流式 POST
     const char *target_url = TIANJI_GATEWAY_URL;
-    esp_http_client_config_t v_cfg = {\
+    esp_http_client_config_t v_cfg = {
         .url = target_url,
         .method = HTTP_METHOD_POST,
         .timeout_ms = TIANJI_GATEWAY_TIMEOUT_MS,
@@ -794,14 +676,6 @@ static void voice_interaction_task(void *pvParameters) {
     esp_http_client_handle_t client = esp_http_client_init(&v_cfg);
     if (!client) {
         ESP_LOGE(TAG, "创建网关 HTTP 客户端失败");
-        s_voice_stop_recording_flag = true;
-        while (s_record_producer_task_handle != NULL && eTaskGetState(s_record_producer_task_handle) != eDeleted) {
-            vTaskDelay(pdMS_TO_TICKS(15));
-        }
-        if (s_rec_ringbuf) {
-            vRingbufferDelete(s_rec_ringbuf);
-            s_rec_ringbuf = NULL;
-        }
         s_voice_state = TIANJI_VOICE_STATE_ERROR;
         snprintf(s_voice_text_reply, sizeof(s_voice_text_reply), "网络客户端创建失败，请稍后再试。");
         if (s_voice_callback) s_voice_callback(s_voice_state, s_voice_text_reply);
@@ -834,14 +708,6 @@ static void voice_interaction_task(void *pvParameters) {
     if (err != ESP_OK || !client) {
         ESP_LOGE(TAG, "打开网关 HTTP 连接最终失败: %s", esp_err_to_name(err));
         if (client) esp_http_client_cleanup(client);
-        s_voice_stop_recording_flag = true;
-        while (s_record_producer_task_handle != NULL && eTaskGetState(s_record_producer_task_handle) != eDeleted) {
-            vTaskDelay(pdMS_TO_TICKS(15));
-        }
-        if (s_rec_ringbuf) {
-            vRingbufferDelete(s_rec_ringbuf);
-            s_rec_ringbuf = NULL;
-        }
         s_voice_state = TIANJI_VOICE_STATE_ERROR;
         snprintf(s_voice_text_reply, sizeof(s_voice_text_reply),
             "无法连通解卦服务\n\n请确认手机热点「%s」正常并已连通互联网。按确定键重试。",
@@ -852,7 +718,7 @@ static void voice_interaction_task(void *pvParameters) {
         return;
     }
 
-    // 5. 发送 multipart/form-data 前置字段与 audio_file 头部
+    // 4. 发送 multipart/form-data 前置字段与 audio_file 头部
     char meta_part[768];
     int meta_len = snprintf(meta_part, sizeof(meta_part),
         "--" MULTIPART_BOUNDARY "\r\n"
@@ -889,29 +755,105 @@ static void voice_interaction_task(void *pvParameters) {
     };
     send_http_chunk(client, &wav_hdr, sizeof(wav_hdr));
 
-    ESP_LOGI(TAG, "HTTP 传输管道已打通，开始从环形缓冲消费历史及实时录音音频...");
-
-    // 6. 从环形缓冲区中提取音频，突发冲刷并持续流式上传至网关
-    uint32_t total_sent_chunks = 0;
-    while (1) {
-        size_t item_size = 0;
-        void *pcm_data = xRingbufferReceiveUpTo(s_rec_ringbuf, &item_size, pdMS_TO_TICKS(40), 1024);
-        if (pcm_data) {
-            if (send_http_chunk(client, pcm_data, item_size) != ESP_OK) {
-                ESP_LOGW(TAG, "发送音频 Chunk 失败，中断网络流");
-                vRingbufferReturnItem(s_rec_ringbuf, pcm_data);
-                s_voice_stop_recording_flag = true;
-                break;
-            }
-            vRingbufferReturnItem(s_rec_ringbuf, pcm_data);
-            total_sent_chunks++;
-        } else if (s_rec_producer_done) {
-            // 录音生产者已退出且环形缓冲区内所有数据均已发送完毕
-            break;
-        }
+    // 5. 【通道已就绪，正式开启录音】播放短促就绪提示音并切换为【请说话...】
+    s_voice_state = TIANJI_VOICE_STATE_RECORDING;
+    if (s_voice_callback) {
+        s_voice_callback(s_voice_state, "【请说话...】");
     }
 
-    ESP_LOGI(TAG, "网络上传完成，共发往网关 %lu 个 Chunk", (unsigned long)total_sent_chunks);
+    bsp_audio_set_format(16000, 16, 1);
+    uint8_t *rec_buf = malloc(1024);
+    if (!rec_buf) {
+        esp_http_client_cleanup(client);
+        s_voice_state = TIANJI_VOICE_STATE_ERROR;
+        snprintf(s_voice_text_reply, sizeof(s_voice_text_reply), "内存不足：无法分配音频采集缓冲区");
+        if (s_voice_callback) s_voice_callback(s_voice_state, s_voice_text_reply);
+        s_voice_task_handle = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    int64_t rec_start_time_us = esp_timer_get_time();
+    s_voice_rec_start_us = rec_start_time_us;
+    int64_t last_speech_time_us = 0;
+    bool user_started_speaking = false;
+    uint32_t consecutive_speech_frames = 0;
+    uint32_t total_sent_chunks = 0;
+    const int SPEECH_ACTIVE_RMS = 280; // 人声真实发音门槛
+
+    ESP_LOGI(TAG, "【网络通道完全就绪】麦克风实时直传开启，秒表正式计时，请对准设备陈述求测之事...");
+
+    // 6. 实时麦克风采集并直接流式上传网关（无任何缓冲堆积，无丢字风险）
+    while (!s_voice_stop_recording_flag) {
+        int64_t now_us = esp_timer_get_time();
+        int64_t elapsed_ms = (now_us - rec_start_time_us) / 1000;
+
+        // 【保底规则 1】物理时间满 10.0 秒，强制截止
+        if (elapsed_ms >= 10000) {
+            ESP_LOGI(TAG, "已达最大允许录音时长 (10.0 秒)，自动结束录音");
+            break;
+        }
+
+        // 【核心规则 2】若从未检测到有效人声说话，满 5.0 秒坚决 100% 自动截止！
+        if (!user_started_speaking && elapsed_ms >= 5000) {
+            ESP_LOGI(TAG, "静音满 5.0 秒，坚决自动结束录音");
+            break;
+        }
+
+        // 【核心规则 3】若已开始说话，说话完毕后停顿满 2.0 秒，且总录音时长满 2.0 秒，自动截止
+        if (user_started_speaking && elapsed_ms >= 2000 && (now_us - last_speech_time_us) >= 2000000LL) {
+            ESP_LOGI(TAG, "说话后停顿满 2.0 秒 (总用时 %lld ms)，自动结束录音", (long long)elapsed_ms);
+            break;
+        }
+
+        esp_err_t r_err = bsp_audio_read(rec_buf, 1024);
+        if (r_err != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
+        // 计算 RMS 能量与音量指示
+        int16_t *samples = (int16_t *)rec_buf;
+        int64_t mean_sum = 0;
+        for (int i = 0; i < 512; i++) {
+            mean_sum += samples[i];
+        }
+        int16_t mean_val = (int16_t)(mean_sum / 512);
+
+        int64_t ac_sum_sq = 0;
+        for (int i = 0; i < 512; i++) {
+            int32_t diff = samples[i] - mean_val;
+            ac_sum_sq += diff * diff;
+        }
+        int rms = (int)sqrt((double)ac_sum_sq / 512.0);
+        int vol = (rms > 6000) ? 100 : (rms * 100 / 6000);
+        s_voice_current_volume = vol;
+
+        // 真实人声判定
+        if (rms >= SPEECH_ACTIVE_RMS) {
+            consecutive_speech_frames++;
+            if (consecutive_speech_frames >= 2) {
+                user_started_speaking = true;
+                last_speech_time_us = esp_timer_get_time();
+            }
+        } else {
+            consecutive_speech_frames = 0;
+        }
+
+        // 直接通过 Chunked HTTP 喷射给网关
+        if (send_http_chunk(client, rec_buf, 1024) != ESP_OK) {
+            ESP_LOGW(TAG, "发送音频 Chunk 失败，中断网络流");
+            break;
+        }
+        total_sent_chunks++;
+    }
+
+    free(rec_buf);
+    s_voice_current_volume = 0;
+
+    int64_t final_dur_ms = (esp_timer_get_time() - rec_start_time_us) / 1000;
+    ESP_LOGI(TAG, "录音采集与直传完成，共发送 %lu 个 Chunk (耗时 %lld ms，开口说话: %s)",
+             (unsigned long)total_sent_chunks, (long long)final_dur_ms, user_started_speaking ? "是" : "否");
 
     // 7. 发送 multipart 尾部及 HTTP 最终终止 chunk (0\r\n\r\n)
     char tail_part[128];
@@ -919,15 +861,6 @@ static void voice_interaction_task(void *pvParameters) {
     send_http_chunk(client, tail_part, tail_len);
     esp_http_client_write(client, "0\r\n\r\n", 5);
 
-    // 确保录音生产者任务已正常销毁并释放 RingBuffer
-    s_voice_stop_recording_flag = true;
-    while (s_record_producer_task_handle != NULL && eTaskGetState(s_record_producer_task_handle) != eDeleted) {
-        vTaskDelay(pdMS_TO_TICKS(15));
-    }
-    if (s_rec_ringbuf) {
-        vRingbufferDelete(s_rec_ringbuf);
-        s_rec_ringbuf = NULL;
-    }
 
     // 8. 切换到【正在解卦...】等待网关处理
     s_voice_state = TIANJI_VOICE_STATE_UPLOADING;

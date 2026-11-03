@@ -23,8 +23,9 @@ typedef enum {
 // 语音交互业务状态
 typedef enum {
     TIANJI_VOICE_STATE_IDLE = 0,
-    TIANJI_VOICE_STATE_RECORDING,    // 正在录音倾听
-    TIANJI_VOICE_STATE_UPLOADING,    // 录音结束，正在上传与等待神思审度
+    TIANJI_VOICE_STATE_CONNECTING,   // 正在连通网关服务
+    TIANJI_VOICE_STATE_RECORDING,    // 网络已就绪，正在实时录音
+    TIANJI_VOICE_STATE_UPLOADING,    // 录音结束，正在等待网关推理
     TIANJI_VOICE_STATE_SUCCESS,      // 解卦成功
     TIANJI_VOICE_STATE_NEED_MORE,    // 意图不足/需要更明确的求测事项
     TIANJI_VOICE_STATE_PLAYING,      // 正在播放宗师语音
