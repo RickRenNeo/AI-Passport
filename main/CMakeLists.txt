@@ -123,8 +123,21 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     target_compile_options(${COMPONENT_LIB} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++23>)
 endif()
 
+string(REGEX MATCH "^font_noto_sans_basic_([0-9]+)_([0-9]+)$" _font_match "${BUILTIN_TEXT_FONT}")
+if(NOT _font_match)
+    set(BUILTIN_TEXT_FONT font_noto_sans_basic_14_1)
+    set(BUILTIN_ICON_FONT font_material_symbols_14_1)
+    string(REGEX MATCH "^font_noto_sans_basic_([0-9]+)_([0-9]+)$" _font_match "${BUILTIN_TEXT_FONT}")
+endif()
+set(TEXT_FONT_SIZE "${CMAKE_MATCH_1}")
+set(TEXT_FONT_BPP "${CMAKE_MATCH_2}")
+
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
     BOARD_TYPE=\"${BOARD_TYPE}\"
     BOARD_NAME=\"${BOARD_NAME}\"
     BOARD_MANUFACTURER=\"${BOARD_MANUFACTURER}\"
+    BUILTIN_TEXT_FONT=${BUILTIN_TEXT_FONT}
+    BUILTIN_ICON_FONT=${BUILTIN_ICON_FONT}
+    TEXT_FONT_SIZE=${TEXT_FONT_SIZE}
+    TEXT_FONT_BPP=${TEXT_FONT_BPP}
 )
