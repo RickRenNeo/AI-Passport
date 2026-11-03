@@ -926,7 +926,7 @@ private:
         // The first argument is a pin bit *mask*, not a pin number. Passing
         // GPIO_NUM_0 (value 0) is rejected as an invalid mask and would leave
         // the device in a deep sleep that no key can end.
-        err = esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(
+        err = esp_deep_sleep_enable_gpio_wakeup(
             1ULL << GPIO_NUM_0, ESP_GPIO_WAKEUP_GPIO_LOW);
         if (err != ESP_OK) {
             // A wakeup source is mandatory: without one the device would only

@@ -20,7 +20,7 @@
 
 static const char *TAG = "tianji_bridge";
 
-static tianji_net_state_t s_net_state = TIANJI_NET_STATE_DISABLED;
+[[maybe_unused]] static tianji_net_state_t s_net_state = TIANJI_NET_STATE_DISABLED;
 static tianji_voice_state_t s_voice_state = TIANJI_VOICE_STATE_IDLE;
 static tianji_session_t s_current_session;
 static tianji_voice_callback_t s_voice_callback = nullptr;
