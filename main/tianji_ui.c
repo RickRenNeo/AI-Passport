@@ -11,11 +11,16 @@
 #include <string.h>
 
 #ifdef ESP_PLATFORM
+#include "esp_timer.h"
 #include "esp_random.h"
 static uint32_t get_hardware_entropy(void) {
     return esp_random();
 }
 #else
+#include <time.h>
+static inline int64_t esp_timer_get_time(void) {
+    return (int64_t)time(NULL) * 1000000LL;
+}
 static uint32_t get_hardware_entropy(void) {
     return (uint32_t)rand();
 }
@@ -39,6 +44,7 @@ static lv_obj_t *s_screen = NULL;
 static lv_obj_t *s_ai_card = NULL;
 static int s_battery_soc = -1;
 static uint8_t s_reading_page = 0; // 0: 卦辞象曰, 1: 事业求财, 2: 姻缘变局
+static int64_t s_voice_listening_enter_us = 0; // 记录进入问卦倾听界面的绝对时间戳，用于按键防抖冷却
 
 static void refresh_view(void);
 static void on_voice_status_update(tianji_voice_state_t state, const char *msg);
@@ -811,6 +817,7 @@ void tianji_ui_handle_key(tianji_key_action_t action) {
                 tianji_net_set_enabled(true);
             }
             s_current_view = TIANJI_VIEW_VOICE_LISTENING;
+            s_voice_listening_enter_us = esp_timer_get_time();
             tianji_audio_play(TIANJI_SFX_START);
             refresh_view();
             tianji_voice_start(&s_session, on_voice_status_update);
@@ -828,8 +835,15 @@ void tianji_ui_handle_key(tianji_key_action_t action) {
 
     case TIANJI_VIEW_VOICE_LISTENING:
         if (action == TIANJI_KEY_OK_CLICK) {
+            // 核心安全保护：进入页面 1.5 秒内，坚决屏蔽任何按键结束！
+            // 彻底消除由总览页按下进入后、按键释放或机械弹跳产生的残留 CLICK 瞬间中断录音的致命隐患！
+            int64_t elapsed_ms = (esp_timer_get_time() - s_voice_listening_enter_us) / 1000;
+            if (elapsed_ms < 1500) {
+                ESP_LOGI(TAG, "录音刚进入冷却保护期 (%lld ms < 1500ms)，屏蔽误触按键", (long long)elapsed_ms);
+                break;
+            }
             if (tianji_voice_is_recording()) {
-                // 用户按确定键结束录音：立即播放反馈音效！
+                // 用户在说话后主动按确定键提前提交：播放完成音效并停止录音
                 tianji_audio_play(TIANJI_SFX_HEX_COMPLETE);
                 tianji_voice_stop_recording();
                 refresh_view();
@@ -850,6 +864,7 @@ void tianji_ui_handle_key(tianji_key_action_t action) {
         if (action == TIANJI_KEY_OK_CLICK) {
             tianji_voice_stop_playing();
             s_current_view = TIANJI_VIEW_VOICE_LISTENING;
+            s_voice_listening_enter_us = esp_timer_get_time();
             tianji_audio_play(TIANJI_SFX_START);
             refresh_view();
             tianji_voice_start(&s_session, on_voice_status_update);

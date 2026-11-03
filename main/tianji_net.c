@@ -406,7 +406,17 @@ const char *tianji_voice_get_audio_url(void) {
     return s_voice_audio_url;
 }
 
+static int64_t s_voice_rec_start_us = 0;
+
 void tianji_voice_stop_recording(void) {
+    if (s_voice_state != TIANJI_VOICE_STATE_RECORDING) {
+        return;
+    }
+    int64_t elapsed_ms = (esp_timer_get_time() - s_voice_rec_start_us) / 1000;
+    if (elapsed_ms < 1500) {
+        ESP_LOGW(TAG, "录音尚未满 1.5 秒 (当前仅 %lld ms)，拒绝响应提前结束指令", (long long)elapsed_ms);
+        return;
+    }
     s_voice_stop_recording_flag = true;
 }
 
@@ -749,6 +759,7 @@ static void voice_interaction_task(void *pvParameters) {
     }
 
     int64_t rec_start_time_us = esp_timer_get_time();
+    s_voice_rec_start_us = rec_start_time_us;
     int64_t last_speech_time_us = 0;
     bool user_started_speaking = false;
     uint32_t consecutive_speech_frames = 0;
@@ -773,9 +784,9 @@ static void voice_interaction_task(void *pvParameters) {
             break;
         }
 
-        // 【核心规则 3】若已开始说话，说话完毕后停顿满 2.0 秒，自动截止
-        if (user_started_speaking && (now_us - last_speech_time_us) >= 2000000LL) {
-            ESP_LOGI(TAG, "说话后停顿满 2.0 秒，自动结束录音");
+        // 【核心规则 3】若已开始说话，说话完毕后停顿满 2.8 秒，且总录音时长满 2.5 秒，自动截止
+        if (user_started_speaking && elapsed_ms >= 2500 && (now_us - last_speech_time_us) >= 2800000LL) {
+            ESP_LOGI(TAG, "说话后停顿满 2.8 秒 (总用时 %lld ms)，自动结束录音", (long long)elapsed_ms);
             break;
         }
 
