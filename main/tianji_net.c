@@ -9,6 +9,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/ringbuf.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -423,7 +424,45 @@ static esp_err_t send_http_chunk(esp_http_client_handle_t client, const void *da
     return ESP_OK;
 }
 
-// 宗师语音流式拉取与扬声器播放后台任务
+// 宗师语音流水线播放控制结构
+typedef struct {
+    RingbufHandle_t ringbuf;
+    volatile bool fetch_done;
+    volatile bool stop_flag;
+} playback_pipe_t;
+
+// 扬声器硬件消费任务：以恒定速度从环形缓冲提取 PCM 喂给硬件 Codec
+static void audio_speaker_consumer_task(void *pvParameters) {
+    playback_pipe_t *pipe = (playback_pipe_t *)pvParameters;
+    bsp_audio_set_format(16000, 16, 1);
+    bsp_audio_set_volume(90);
+
+    // 预缓冲等待：等待缓冲区积攒至少 6144 字节（约 200ms）或者网络已提前下发完毕
+    while (!pipe->stop_flag && !pipe->fetch_done) {
+        size_t cur_size = 0;
+        vRingbufferGetInfo(pipe->ringbuf, NULL, NULL, NULL, NULL, &cur_size);
+        if (cur_size >= 6144) break;
+        vTaskDelay(pdMS_TO_TICKS(15));
+    }
+
+    ESP_LOGI(TAG, "预防水位已就绪，扬声器平滑连续回放启动...");
+
+    while (!pipe->stop_flag) {
+        size_t item_size = 0;
+        void *pcm_data = xRingbufferReceiveUpTo(pipe->ringbuf, &item_size, pdMS_TO_TICKS(50), 2048);
+        if (pcm_data) {
+            bsp_audio_write(pcm_data, item_size);
+            vRingbufferReturnItem(pipe->ringbuf, pcm_data);
+        } else if (pipe->fetch_done) {
+            // 网络已下载完毕且缓冲区已全部排空
+            break;
+        }
+    }
+
+    vTaskDelete(NULL);
+}
+
+// 宗师语音流式拉取后台任务（充当生产者，持续从网络填满 16KB 环形缓冲）
 static void voice_playback_task(void *pvParameters) {
     (void)pvParameters;
     s_voice_state = TIANJI_VOICE_STATE_PLAYING;
@@ -441,7 +480,7 @@ static void voice_playback_task(void *pvParameters) {
         .url = full_audio_url,
         .method = HTTP_METHOD_GET,
         .timeout_ms = 15000,
-        .buffer_size = 2048,
+        .buffer_size = 4096,
         .buffer_size_tx = 1024,
         .crt_bundle_attach = (strncmp(full_audio_url, "https://", 8) == 0) ? esp_crt_bundle_attach : NULL,
     };
@@ -491,11 +530,7 @@ static void voice_playback_task(void *pvParameters) {
         return;
     }
 
-    // 设置扬声器输出格式为 16kHz 16-bit 单声道
-    bsp_audio_set_format(16000, 16, 1);
-    bsp_audio_set_volume(90);
-
-    // 1. 读取并跳过 44 字节 WAV 头
+    // 1. 读取并跳过 44 字节 WAV 头部
     char header_buf[44];
     int head_read = 0;
     while (head_read < 44 && !s_voice_stop_playing_flag) {
@@ -504,20 +539,55 @@ static void voice_playback_task(void *pvParameters) {
         head_read += r;
     }
 
-    // 2. 循环读取流式 PCM 音频写入扬声器
-    uint8_t *pcm_play_buf = malloc(1024);
-    if (pcm_play_buf) {
-        while (!s_voice_stop_playing_flag) {
-            int r = esp_http_client_read(p_client, (char *)pcm_play_buf, 1024);
-            if (r <= 0) {
-                break; // 流式传输结束
-            }
-            bsp_audio_write(pcm_play_buf, (size_t)r);
-        }
-        free(pcm_play_buf);
+    // 2. 创建 16KB 字节环形缓冲区并启动扬声器消费任务
+    RingbufHandle_t play_rb = xRingbufferCreate(16384, RINGBUF_TYPE_BYTEBUF);
+    if (!play_rb) {
+        ESP_LOGE(TAG, "无法分配 16KB 播放环形缓冲区");
+        esp_http_client_cleanup(p_client);
+        s_voice_state = TIANJI_VOICE_STATE_IDLE;
+        s_playback_task_handle = NULL;
+        vTaskDelete(NULL);
+        return;
     }
 
+    playback_pipe_t pipe = {
+        .ringbuf = play_rb,
+        .fetch_done = false,
+        .stop_flag = false
+    };
+
+    TaskHandle_t consumer_handle = NULL;
+    xTaskCreate(audio_speaker_consumer_task, "spk_out", 3072, &pipe, 6, &consumer_handle);
+
+    // 3. 网络拉取循环：以 2KB 块持续读取并填入环形缓冲
+    uint8_t *net_chunk = malloc(2048);
+    if (net_chunk) {
+        while (!s_voice_stop_playing_flag) {
+            int r = esp_http_client_read(p_client, (char *)net_chunk, 2048);
+            if (r <= 0) {
+                break; // 网络流传输完成
+            }
+            // 压入环形缓冲，超时等待最多 1.5 秒（当扬声器消费较慢时背压等待）
+            if (xRingbufferSend(play_rb, net_chunk, (size_t)r, pdMS_TO_TICKS(1500)) != pdTRUE) {
+                ESP_LOGW(TAG, "环形缓冲积压超时");
+            }
+        }
+        free(net_chunk);
+    }
+
+    pipe.fetch_done = true;
     esp_http_client_cleanup(p_client);
+
+    // 4. 等待扬声器消费任务播放完毕（或用户打断退出）
+    while (consumer_handle != NULL && eTaskGetState(consumer_handle) != eDeleted) {
+        if (s_voice_stop_playing_flag) {
+            pipe.stop_flag = true;
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    vRingbufferDelete(play_rb);
     s_voice_state = TIANJI_VOICE_STATE_IDLE;
     s_playback_task_handle = NULL;
     ESP_LOGI(TAG, "宗师语音播放完成或已打断停止");
@@ -683,7 +753,7 @@ static void voice_interaction_task(void *pvParameters) {
     bool user_started_speaking = false;
     uint32_t consecutive_speech_frames = 0;
     uint32_t total_chunks = 0;
-    const int SPEECH_ACTIVE_RMS = 950; // 人声发音高能量门槛
+    const int SPEECH_ACTIVE_RMS = 280; // 人声真实发音门槛（正常手持距离为 280~500）
 
     ESP_LOGI(TAG, "麦克风采集已开启，硬件秒表计时开始，对准设备陈述求测之事...");
 
@@ -732,10 +802,10 @@ static void voice_interaction_task(void *pvParameters) {
         int vol = (rms > 6000) ? 100 : (rms * 100 / 6000);
         s_voice_current_volume = vol;
 
-        // 真实语音发声判定：需连续 3 帧（约 100ms）以上高于门槛，排除偶发脉冲干扰
+        // 真实语音发声判定：连续 2 帧（约 64ms）超过 280 即确认为真人说话
         if (rms >= SPEECH_ACTIVE_RMS) {
             consecutive_speech_frames++;
-            if (consecutive_speech_frames >= 3) {
+            if (consecutive_speech_frames >= 2) {
                 user_started_speaking = true;
                 last_speech_time_us = esp_timer_get_time();
             }

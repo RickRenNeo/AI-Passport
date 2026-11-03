@@ -304,6 +304,20 @@ async def divination_voice(
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="上传音频文件为空")
 
+    debug_dump_path = BASE_DIR / "debug_last_upload.wav"
+    try:
+        with open(debug_dump_path, "wb") as df:
+            df.write(audio_bytes)
+        logger.info(f"已持久化保存最新上传音频到 {debug_dump_path}，大小={len(audio_bytes)} 字节")
+        if len(audio_bytes) > 44:
+            import numpy as np
+            samples = np.frombuffer(audio_bytes[44:], dtype=np.int16)
+            peak = int(np.max(np.abs(samples))) if len(samples) > 0 else 0
+            mean_rms = int(np.sqrt(np.mean(samples.astype(np.float64)**2))) if len(samples) > 0 else 0
+            logger.info(f"上传音频统计: 采样点数={len(samples)}, 峰值振幅={peak}, 全局RMS={mean_rms}")
+    except Exception as de:
+        logger.warning(f"保存调试音频失败: {de}")
+
     wav_input_path = ensure_wav_format(audio_bytes, audio_file.filename or "input.wav")
 
     # 2. 语音识别 (ASR) - 使用 to_thread 避免阻塞事件循环
