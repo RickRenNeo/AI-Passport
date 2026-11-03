@@ -5,7 +5,7 @@ dependencies:
   espressif/esp_audio_codec: ~2.5.0
   78/xiaozhi-fonts: ~2.0.0
   espressif/led_strip: ~3.0.3
-  espressif/esp_codec_dev: ~1.6.2
-  espressif/button: ~4.2.1
-  lvgl/lvgl: ~9.5.0
-  esp_lvgl_port: ~2.9.0
+  espressif/esp_codec_dev: "1.6.2"
+  espressif/button: "4.2.0"
+  lvgl/lvgl: "9.5.0"
+  esp_lvgl_port: "2.9.0"
