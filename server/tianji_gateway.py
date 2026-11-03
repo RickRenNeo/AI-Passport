@@ -41,6 +41,10 @@ BASE_DIR = Path(__file__).resolve().parent
 AUDIO_CACHE_DIR = BASE_DIR / "audio_cache"
 AUDIO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
+GATEWAY_TMP_DIR = BASE_DIR / "tmp"
+GATEWAY_TMP_DIR.mkdir(parents=True, exist_ok=True)
+tempfile.tempdir = str(GATEWAY_TMP_DIR)
+
 app = FastAPI(
     title="Tianji Liuyao Voice Gateway",
     description="Voice Interaction Hub for FoloToy AI Passport Tianji-Liuyao",
