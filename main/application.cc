@@ -339,7 +339,7 @@ void Application::HandleNetworkConnectedEvent() {
 }
 
 void Application::HandleNetworkDisconnectedEvent() {
-    tianji_bridge_set_net_state(TIANJI_NET_STATE_DISCONNECTED);
+    tianji_bridge_set_net_state(TIANJI_NET_STATE_DISABLED);
     // Close current conversation when network disconnected
     auto state = GetDeviceState();
     if (state == kDeviceStateNotifying) {
