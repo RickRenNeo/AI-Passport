@@ -61,6 +61,11 @@ void tianji_bridge_init(void) {
     // 在 LVGL 锁保护下初始化六爻国风 UI
     if (bsp_lvgl_lock(200)) {
         tianji_ui_init();
+        int soc = 0;
+        bool chg = false, dchg = false;
+        if (Board::GetInstance().GetBatteryLevel(soc, chg, dchg) && soc >= 0) {
+            tianji_ui_update_battery(soc);
+        }
         bsp_lvgl_unlock();
     }
 }
@@ -77,6 +82,10 @@ void tianji_bridge_update_battery(int soc) {
         tianji_ui_update_battery(soc);
         bsp_lvgl_unlock();
     }
+}
+
+void tianji_bridge_set_net_state(tianji_net_state_t state) {
+    s_net_state = state;
 }
 
 void tianji_bridge_on_stt_text(const char *text) {

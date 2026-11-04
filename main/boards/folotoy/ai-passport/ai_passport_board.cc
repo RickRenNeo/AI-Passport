@@ -1132,7 +1132,6 @@ public:
         InitializeButtons();
         GetBacklight()->RestoreBrightness();
         InitializePowerSaveTimer();
-        tianji_bridge_init();
     }
 
     virtual AudioCodec* GetAudioCodec() override {

@@ -18,6 +18,9 @@ void tianji_bridge_handle_key(tianji_key_action_t action);
 // 电池电量更新
 void tianji_bridge_update_battery(int soc);
 
+// 网络状态更新
+void tianji_bridge_set_net_state(tianji_net_state_t state);
+
 // 协议层回调注入：收到 STT 识别文本
 void tianji_bridge_on_stt_text(const char *text);
 

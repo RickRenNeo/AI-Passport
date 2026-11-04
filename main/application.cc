@@ -81,6 +81,9 @@ void Application::Initialize() {
     ESP_LOGI(TAG, "After board/audio init");
     SystemInfo::PrintHeapStats();
 
+    // 初始化天机·六爻周易推演系统并加载国风主屏
+    tianji_bridge_init();
+
     AudioServiceCallbacks callbacks;
     callbacks.on_send_queue_available = [this]() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);
@@ -287,6 +290,12 @@ void Application::Run() {
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
 
+            int soc = 0;
+            bool chg = false, dchg = false;
+            if (Board::GetInstance().GetBatteryLevel(soc, chg, dchg) && soc >= 0) {
+                tianji_bridge_update_battery(soc);
+            }
+
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
@@ -303,6 +312,7 @@ void Application::Run() {
 
 void Application::HandleNetworkConnectedEvent() {
     ESP_LOGI(TAG, "Network connected");
+    tianji_bridge_set_net_state(TIANJI_NET_STATE_CONNECTED);
     auto state = GetDeviceState();
 
     if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
@@ -329,6 +339,7 @@ void Application::HandleNetworkConnectedEvent() {
 }
 
 void Application::HandleNetworkDisconnectedEvent() {
+    tianji_bridge_set_net_state(TIANJI_NET_STATE_DISCONNECTED);
     // Close current conversation when network disconnected
     auto state = GetDeviceState();
     if (state == kDeviceStateNotifying) {
