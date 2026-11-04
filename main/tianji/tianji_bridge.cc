@@ -153,6 +153,21 @@ bool tianji_net_is_connected(void) {
     return WifiManager::GetInstance().IsConnected();
 }
 
+bool tianji_net_is_config_mode(void) {
+    return WifiManager::GetInstance().IsConfigMode();
+}
+
+const char *tianji_get_ap_suffix(void) {
+    static char suffix[8] = {0};
+    uint8_t mac[6];
+    if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK) {
+        snprintf(suffix, sizeof(suffix), "%02X%02X", mac[4], mac[5]);
+    } else {
+        snprintf(suffix, sizeof(suffix), "C781");
+    }
+    return suffix;
+}
+
 tianji_net_state_t tianji_net_get_state(void) {
     if (!s_net_enabled) return TIANJI_NET_STATE_DISABLED;
     if (WifiManager::GetInstance().IsConnected()) return TIANJI_NET_STATE_CONNECTED;

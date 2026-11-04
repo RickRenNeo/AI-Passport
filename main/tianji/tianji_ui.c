@@ -62,6 +62,9 @@ static void update_net_label(lv_obj_t *lbl_net) {
                 lv_obj_set_style_text_color(lbl_net, lv_color_hex(COLOR_AMBER), 0);
                 lv_label_set_text(lbl_net, "解卦");
             }
+        } else if (tianji_net_is_config_mode()) {
+            lv_obj_set_style_text_color(lbl_net, lv_color_hex(COLOR_AMBER), 0);
+            lv_label_set_text(lbl_net, "配网");
         } else if (s_current_view == TIANJI_VIEW_AI && tianji_voice_is_playing()) {
             lv_obj_set_style_text_color(lbl_net, lv_color_hex(COLOR_CYAN), 0);
             lv_label_set_text(lbl_net, "诵读");
@@ -248,7 +251,9 @@ static void render_view_standby(void) {
     lv_obj_set_style_text_color(mode_lbl, lv_color_hex(COLOR_GRAY), 0);
     lv_obj_set_style_text_align(mode_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_line_space(mode_lbl, 6, 0);
-    if (tianji_net_is_enabled()) {
+    if (tianji_net_is_config_mode()) {
+        lv_label_set_text_fmt(mode_lbl, "配网模式: 请连接热点\nXiaozhi-%s\n访问 192.168.4.1", tianji_get_ap_suffix());
+    } else if (tianji_net_is_enabled()) {
         lv_label_set_text(mode_lbl, "起卦法则：三钱古法\n运行模式：联机模式");
     } else {
         lv_label_set_text(mode_lbl, "起卦法则：三钱古法\n运行模式：脱机模式");
@@ -774,21 +779,21 @@ void tianji_ui_init(void) {
     s_current_view = TIANJI_VIEW_STANDBY;
     s_reading_page = 0;
 
-    s_screen = lv_obj_create(NULL);
+    // 直接接管当前物理活动屏幕，构建《天机·六爻》全屏国风界面
+    s_screen = lv_screen_active();
+    lv_obj_clean(s_screen);
     lv_obj_set_style_bg_color(s_screen, lv_color_hex(COLOR_BG), 0);
     lv_obj_set_style_bg_opa(s_screen, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(s_screen, 0, 0);
     lv_obj_set_scrollbar_mode(s_screen, LV_SCROLLBAR_MODE_OFF);
 
     refresh_view();
-    lv_screen_load(s_screen);
-    ESP_LOGI(TAG, "天机六爻 UI 系统初始化完成");
+    ESP_LOGI(TAG, "天机六爻 UI 系统初始化完成（已直接绑定主物理屏）");
 }
 
 void tianji_ui_destroy(void) {
     if (s_screen) {
         lv_obj_clean(s_screen);
-        lv_obj_delete(s_screen);
         s_screen = NULL;
         s_ai_card = NULL;
         s_lbl_bat = NULL;
@@ -810,7 +815,9 @@ void tianji_ui_update_battery(int soc) {
 
 void tianji_ui_update_net_state(tianji_net_state_t state) {
     (void)state;
-    if (s_lbl_net && lv_obj_is_valid(s_lbl_net)) {
+    if (s_current_view == TIANJI_VIEW_STANDBY) {
+        refresh_view();
+    } else if (s_lbl_net && lv_obj_is_valid(s_lbl_net)) {
         update_net_label(s_lbl_net);
     }
 }

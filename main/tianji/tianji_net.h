@@ -48,6 +48,12 @@ bool tianji_net_is_enabled(void);
 // 获取当前 Wi-Fi 是否已成功获取 IP 连接就绪
 bool tianji_net_is_connected(void);
 
+// 获取当前是否处于热点配网模式
+bool tianji_net_is_config_mode(void);
+
+// 获取配网热点后缀（如 MAC 后两位 hex）
+const char *tianji_get_ap_suffix(void);
+
 // 获取当前网络状态
 tianji_net_state_t tianji_net_get_state(void);
 

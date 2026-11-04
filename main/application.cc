@@ -136,10 +136,10 @@ void Application::Initialize() {
                 xEventGroupSetBits(event_group_, MAIN_EVENT_NETWORK_DISCONNECTED);
                 break;
             case NetworkEvent::WifiConfigModeEnter:
-                // WiFi config mode enter is handled by WifiBoard internally
+                tianji_bridge_set_net_state(TIANJI_NET_STATE_CONNECTING);
                 break;
             case NetworkEvent::WifiConfigModeExit:
-                // WiFi config mode exit is handled by WifiBoard internally
+                tianji_bridge_set_net_state(TIANJI_NET_STATE_CONNECTING);
                 break;
             // Cellular modem specific events
             case NetworkEvent::ModemDetecting:

@@ -396,12 +396,9 @@ void LcdDisplay::SetupUI() {
     Display::SetupUI();  // Mark SetupUI as called
     DisplayLockGuard lock(this);
 
-    auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
-    auto text_font = lvgl_theme->text_font()->font();
-    auto icon_font = lvgl_theme->icon_font()->font();
-    auto large_icon_font = lvgl_theme->large_icon_font()->font();
-
-    auto screen = lv_screen_active();
+    // AI Passport 掌机专用：由《天机·六爻》周易推演全屏国风主界面完全接管，不创建小智原生聊天气泡和滚动状态栏
+    ESP_LOGI(TAG, "LcdDisplay::SetupUI: 天机·六爻周易推演主屏接管模式");
+    return;
     lv_obj_set_style_text_font(screen, text_font, 0);
     lv_obj_set_style_text_color(screen, lvgl_theme->text_color(), 0);
     lv_obj_set_style_bg_color(screen, lvgl_theme->background_color(), 0);
@@ -893,12 +890,10 @@ void LcdDisplay::SetupUI() {
 
     Display::SetupUI();  // Mark SetupUI as called
     DisplayLockGuard lock(this);
-    LvglTheme* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
-    auto text_font = lvgl_theme->text_font()->font();
-    auto icon_font = lvgl_theme->icon_font()->font();
-    auto large_icon_font = lvgl_theme->large_icon_font()->font();
 
-    auto screen = lv_screen_active();
+    // AI Passport 掌机专用：由《天机·六爻》周易推演全屏国风主界面完全接管，不创建小智原生聊天气泡和滚动状态栏
+    ESP_LOGI(TAG, "LcdDisplay::SetupUI: 天机·六爻周易推演主屏接管模式");
+    return;
     lv_obj_set_style_text_font(screen, text_font, 0);
     lv_obj_set_style_text_color(screen, lvgl_theme->text_color(), 0);
     lv_obj_set_style_bg_color(screen, lvgl_theme->background_color(), 0);
