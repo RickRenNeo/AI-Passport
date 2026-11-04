@@ -36,6 +36,9 @@ static bool s_net_enabled = true;
 extern "C" esp_err_t bsp_audio_write(const void *data, size_t size) {
     auto codec = Board::GetInstance().GetAudioCodec();
     if (!codec || !data || size == 0) return ESP_FAIL;
+    if (!codec->output_enabled()) {
+        codec->EnableOutput(true);
+    }
     size_t sample_count = size / sizeof(int16_t);
     std::vector<int16_t> pcm(static_cast<const int16_t*>(data),
                              static_cast<const int16_t*>(data) + sample_count);
@@ -57,6 +60,11 @@ extern "C" esp_err_t bsp_audio_set_volume(uint8_t volume) {
 void tianji_bridge_init(void) {
     ESP_LOGI(TAG, "初始化天机·六爻小智桥接层...");
     tianji_audio_init();
+
+    auto codec = Board::GetInstance().GetAudioCodec();
+    if (codec && !codec->output_enabled()) {
+        codec->EnableOutput(true);
+    }
 
     // 在 LVGL 锁保护下初始化六爻国风 UI
     if (bsp_lvgl_lock(200)) {
@@ -86,6 +94,10 @@ void tianji_bridge_update_battery(int soc) {
 
 void tianji_bridge_set_net_state(tianji_net_state_t state) {
     s_net_state = state;
+    if (bsp_lvgl_lock(100)) {
+        tianji_ui_update_net_state(state);
+        bsp_lvgl_unlock();
+    }
 }
 
 void tianji_bridge_on_stt_text(const char *text) {

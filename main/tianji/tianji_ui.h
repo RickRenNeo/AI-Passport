@@ -43,6 +43,9 @@ void tianji_ui_handle_key(tianji_key_action_t action);
 // 更新电池电量显示 (0..100%, -1 为不可用)
 void tianji_ui_update_battery(int soc);
 
+// 更新网络状态显示
+void tianji_ui_update_net_state(tianji_net_state_t state);
+
 // 获取当前 UI 状态
 tianji_view_t tianji_ui_get_current_view(void);
 

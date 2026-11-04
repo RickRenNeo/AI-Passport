@@ -42,35 +42,17 @@ static tianji_session_t s_session;
 static tianji_view_t s_current_view = TIANJI_VIEW_STANDBY;
 static lv_obj_t *s_screen = NULL;
 static lv_obj_t *s_ai_card = NULL;
+static lv_obj_t *s_lbl_bat = NULL;
+static lv_obj_t *s_lbl_net = NULL;
 static int s_battery_soc = -1;
 static uint8_t s_reading_page = 0; // 0: 卦辞象曰, 1: 事业求财, 2: 姻缘变局
-static int64_t s_voice_listening_enter_us = 0; // 记录进入问卦倾听界面的绝对时间戳，用于按键防抖冷却
+static int64_t s_voice_listening_enter_us = 0; // 记录进入问卦倾听绝对时间戳，用于按键防抖冷却
 
 static void refresh_view(void);
 static void on_voice_status_update(tianji_voice_state_t state, const char *msg);
 
-// 顶部状态栏 (纯净中文，右上角电量)
-static void build_header(lv_obj_t *parent, const char *title) {
-    lv_obj_t *header = lv_obj_create(parent);
-    lv_obj_set_size(header, 240, 26);
-    lv_obj_set_pos(header, 0, 0);
-    lv_obj_set_style_bg_color(header, lv_color_hex(COLOR_BG), 0);
-    lv_obj_set_style_bg_opa(header, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(header, 0, 0);
-    lv_obj_set_style_pad_all(header, 0, 0);
-    lv_obj_set_scrollbar_mode(header, LV_SCROLLBAR_MODE_OFF);
-
-    // 标题
-    lv_obj_t *lbl_title = lv_label_create(header);
-    lv_obj_set_style_text_font(lbl_title, &tianji_font_16, 0);
-    lv_obj_set_style_text_color(lbl_title, lv_color_hex(COLOR_CYAN), 0);
-    lv_label_set_text(lbl_title, title);
-    lv_obj_set_width(lbl_title, 130);
-    lv_obj_set_pos(lbl_title, 12, 4);
-
-    // 状态徽标
-    lv_obj_t *lbl_net = lv_label_create(header);
-    lv_obj_set_style_text_font(lbl_net, &tianji_font_16, 0);
+static void update_net_label(lv_obj_t *lbl_net) {
+    if (!lbl_net || !lv_obj_is_valid(lbl_net)) return;
     if (tianji_net_is_enabled()) {
         if (s_current_view == TIANJI_VIEW_VOICE_LISTENING) {
             if (tianji_voice_is_recording()) {
@@ -103,10 +85,37 @@ static void build_header(lv_obj_t *parent, const char *title) {
         lv_obj_set_style_text_color(lbl_net, lv_color_hex(COLOR_MUTED), 0);
         lv_label_set_text(lbl_net, "脱机");
     }
+}
+
+// 顶部状态栏 (纯净中文，右上角电量)
+static void build_header(lv_obj_t *parent, const char *title) {
+    lv_obj_t *header = lv_obj_create(parent);
+    lv_obj_set_size(header, 240, 26);
+    lv_obj_set_pos(header, 0, 0);
+    lv_obj_set_style_bg_color(header, lv_color_hex(COLOR_BG), 0);
+    lv_obj_set_style_bg_opa(header, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(header, 0, 0);
+    lv_obj_set_style_pad_all(header, 0, 0);
+    lv_obj_set_scrollbar_mode(header, LV_SCROLLBAR_MODE_OFF);
+
+    // 标题
+    lv_obj_t *lbl_title = lv_label_create(header);
+    lv_obj_set_style_text_font(lbl_title, &tianji_font_16, 0);
+    lv_obj_set_style_text_color(lbl_title, lv_color_hex(COLOR_CYAN), 0);
+    lv_label_set_text(lbl_title, title);
+    lv_obj_set_width(lbl_title, 130);
+    lv_obj_set_pos(lbl_title, 12, 4);
+
+    // 状态徽标
+    lv_obj_t *lbl_net = lv_label_create(header);
+    s_lbl_net = lbl_net;
+    lv_obj_set_style_text_font(lbl_net, &tianji_font_16, 0);
+    update_net_label(lbl_net);
     lv_obj_align(lbl_net, LV_ALIGN_TOP_RIGHT, -54, 4);
 
     // 右上角电量指示
     lv_obj_t *lbl_bat = lv_label_create(header);
+    s_lbl_bat = lbl_bat;
     lv_obj_set_style_text_font(lbl_bat, &tianji_font_16, 0);
     lv_obj_set_style_text_color(lbl_bat, lv_color_hex(COLOR_GRAY), 0);
     if (s_battery_soc >= 0) {
@@ -728,6 +737,8 @@ static void on_voice_status_update(tianji_voice_state_t state, const char *msg) 
 
 static void refresh_view(void) {
     if (!s_screen) return;
+    s_lbl_bat = NULL;
+    s_lbl_net = NULL;
     lv_obj_clean(s_screen);
 
     switch (s_current_view) {
@@ -780,12 +791,28 @@ void tianji_ui_destroy(void) {
         lv_obj_delete(s_screen);
         s_screen = NULL;
         s_ai_card = NULL;
+        s_lbl_bat = NULL;
+        s_lbl_net = NULL;
     }
 }
 
 void tianji_ui_update_battery(int soc) {
+    if (s_battery_soc == soc) return;
     s_battery_soc = soc;
-    refresh_view();
+    if (s_lbl_bat && lv_obj_is_valid(s_lbl_bat)) {
+        if (s_battery_soc >= 0) {
+            lv_label_set_text_fmt(s_lbl_bat, "%d%%", s_battery_soc);
+        } else {
+            lv_label_set_text(s_lbl_bat, "--%");
+        }
+    }
+}
+
+void tianji_ui_update_net_state(tianji_net_state_t state) {
+    (void)state;
+    if (s_lbl_net && lv_obj_is_valid(s_lbl_net)) {
+        update_net_label(s_lbl_net);
+    }
 }
 
 tianji_view_t tianji_ui_get_current_view(void) {
