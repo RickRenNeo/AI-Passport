@@ -963,6 +963,19 @@ void LcdDisplay::SetTheme(Theme* theme) {
 
     auto lvgl_theme = static_cast<LvglTheme*>(theme);
 
+    // 天机·六爻接管模式：SetupUI() 刻意不创建任何小智原生控件，因此下面用到的
+    // status_bar_/mute_label_/container_/low_battery_popup_ 等全部为 nullptr。
+    // 联网后 Application::CheckAssetsVersion() 会调用 assets.Apply()，其结尾的
+    // refresh_display_theme 会回调 display->SetTheme()；若继续往下执行就会对空控件
+    // 设置样式，导致配置 Wi-Fi 后立刻崩溃重启。此处只记录主题并直接返回。
+    if (mute_label_ == nullptr || network_label_ == nullptr || status_label_ == nullptr ||
+        notification_label_ == nullptr || battery_label_ == nullptr ||
+        container_ == nullptr || low_battery_popup_ == nullptr || emoji_label_ == nullptr) {
+        ESP_LOGI(TAG, "SetTheme('%s'): 天机界面接管中，跳过小智控件主题绑定", lvgl_theme->name().c_str());
+        Display::SetTheme(lvgl_theme);
+        return;
+    }
+
     // Get the active screen
     lv_obj_t* screen = lv_screen_active();
 
