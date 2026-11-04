@@ -65,7 +65,7 @@ enum class Phase {
 constexpr int64_t kTickUs = 100 * 1000;             // 100 ms 看门狗
 constexpr int64_t kSilenceStopUs = 2 * 1000 * 1000; // 说话结束后静音 2 秒自动呈报（贴近小智原生 VAD）
 constexpr int64_t kNoVoiceWaitUs = 5 * 1000 * 1000; // 一直没开口：5 秒后自动收起麦克风，不提交空录音
-constexpr int64_t kMaxRecordUs = 12 * 1000 * 1000;  // 单轮录音硬上限
+constexpr int64_t kMaxRecordUs = 20 * 1000 * 1000;  // 单轮录音硬上限
 constexpr int64_t kConnectTimeoutUs = 15 * 1000 * 1000;
 constexpr int64_t kAnswerTimeoutUs = 8 * 1000 * 1000;   // 提交后 8 秒内连 STT 都没回，判定本轮空转
 constexpr int64_t kFollowupDelayUs = 300 * 1000;    // 断语播毕后稍等再开麦
@@ -456,7 +456,7 @@ static std::string BuildHexagramContext() {
         append("姻缘参考：%s\n", primary->relationship);
     }
     append("【作答要求】用口语化中文直接断吉凶，再点一条最要紧的可执行建议。"
-           "全文不得超过 80 字，只写 2~3 个短句，每句不超过 25 字。"
+           "全文不得超过 100 字，只写 2~3 个短句，每句不超过 30 字。"
            "本机边生成边播报，句子越多、句子越长，语音停顿越明显，必须短。"
            "不要念出本段格式说明，也不要输出任何英文、符号或工具名。");
     return text;
@@ -469,7 +469,7 @@ static void RegisterHexagramTool() {
         "同时带回本页此前的问答记录。"
         "当用户询问占卜、解卦、问卦、求测事业/财运/姻缘/吉凶，或要求详细解释、追问、复述上文时，"
         "必须先调用本工具获取卦象与上文，再作答。收到请求后请立即调用，调用前不要输出任何寒暄、"
-        "过渡语、百分号或工具名。作答必须控制在 80 字以内、2~3 个短句（本机语音逐句播报，"
+        "过渡语、百分号或工具名。作答必须控制在 100 字以内、2~3 个短句（本机语音逐句播报，"
         "长答案会造成长时间停顿）。严禁在未调用本工具时凭空编造卦象或复述上文。",
         PropertyList(), [](const PropertyList&) -> ToolResult {
             std::string context = BuildHexagramContext();
