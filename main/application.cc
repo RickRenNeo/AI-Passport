@@ -122,39 +122,16 @@ void Application::Initialize() {
 
     // Set network event callback for UI updates and network state handling
     board.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
-        auto display = Board::GetInstance().GetDisplay();
-
+        (void)data;
         switch (event) {
             case NetworkEvent::Scanning:
-                display->ShowNotification(Lang::Strings::SCANNING_WIFI, 30000);
                 xEventGroupSetBits(event_group_, MAIN_EVENT_NETWORK_DISCONNECTED);
                 break;
-            case NetworkEvent::Connecting: {
-                if (data.empty()) {
-                    // Cellular network - registering without carrier info yet
-                    Schedule([display]() {
-                        display->SetStatus(Lang::Strings::REGISTERING_NETWORK);
-                    });
-                } else {
-                    // WiFi or cellular with carrier info
-                    std::string msg = Lang::Strings::CONNECT_TO;
-                    msg += data;
-                    msg += "...";
-                    Schedule([display, msg]() {
-                        display->ShowNotification(msg.c_str(), 30000);
-                    });
-                }
+            case NetworkEvent::Connecting:
                 break;
-            }
-            case NetworkEvent::Connected: {
-                std::string msg = Lang::Strings::CONNECTED_TO;
-                msg += data;
-                Schedule([display, msg]() {
-                    display->ShowNotification(msg.c_str(), 30000);
-                });
+            case NetworkEvent::Connected:
                 xEventGroupSetBits(event_group_, MAIN_EVENT_NETWORK_CONNECTED);
                 break;
-            }
             case NetworkEvent::Disconnected:
                 xEventGroupSetBits(event_group_, MAIN_EVENT_NETWORK_DISCONNECTED);
                 break;
