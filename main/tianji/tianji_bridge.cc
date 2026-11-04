@@ -161,7 +161,9 @@ bool tianji_net_is_config_mode(void) {
 const char *tianji_get_ap_suffix(void) {
     static char suffix[8] = {0};
     uint8_t mac[6];
-    if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK) {
+    // 配网热点由 WifiConfigurationAp 用 SoftAP MAC 生成（末尾比 STA MAC 大 1），
+    // 必须用 ESP_MAC_WIFI_SOFTAP，否则屏上提示的热点名和实际 SSID 对不上。
+    if (esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP) == ESP_OK) {
         snprintf(suffix, sizeof(suffix), "%02X%02X", mac[4], mac[5]);
     } else {
         snprintf(suffix, sizeof(suffix), "C781");
