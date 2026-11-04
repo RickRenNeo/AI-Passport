@@ -121,7 +121,7 @@ void Application::Initialize() {
     mcp_server.LogToolInventory();
 
     // Set network event callback for UI updates and network state handling
-    board.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
+    board.SetNetworkEventCallback([this, display](NetworkEvent event, const std::string& data) {
         (void)data;
         switch (event) {
             case NetworkEvent::Scanning:
