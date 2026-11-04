@@ -70,6 +70,8 @@ public:
 
     DeviceState GetDeviceState() const { return state_machine_.GetState(); }
     bool IsVoiceDetected() const { return audio_service_.IsVoiceDetected(); }
+    // 播放队列是否已播完：多轮语音在断语真正听完后再开麦，避免录到自己的回声。
+    bool IsAudioPlaybackIdle() { return audio_service_.IsPlaybackIdle(); }
     
     /**
      * Request state transition

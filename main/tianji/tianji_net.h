@@ -73,6 +73,9 @@ const char *tianji_net_get_ai_result(void);
 // 启动语音解卦流程（录音采集 -> WAV 上传 -> 流式播放）
 esp_err_t tianji_voice_start(const tianji_session_t *session, tianji_voice_callback_t cb);
 
+// 在同一段解卦会话内继续追问：复用既有的小智音频通道，不清空已上屏的断语
+void tianji_voice_followup(void);
+
 // 用户手动结束说话（再次按下确定键）
 void tianji_voice_stop_recording(void);
 

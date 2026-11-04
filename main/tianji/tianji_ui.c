@@ -48,7 +48,7 @@ static lv_obj_t *s_lbl_bat = NULL;
 static lv_obj_t *s_lbl_net = NULL;
 static int s_battery_soc = -1;
 static uint8_t s_reading_page = 0; // 0: 卦辞象曰, 1: 事业求财, 2: 姻缘变局
-static int64_t s_voice_listening_enter_us = 0; // 记录进入问卦倾听绝对时间戳，用于按键防抖冷却
+static int64_t s_ai_enter_us = 0; // 进入解卦页的绝对时间戳，用于按键防抖冷却
 
 static void refresh_view(void);
 static void on_voice_status_update(tianji_voice_state_t state, const char *msg);
@@ -56,20 +56,24 @@ static void on_voice_status_update(tianji_voice_state_t state, const char *msg);
 static void update_net_label(lv_obj_t *lbl_net) {
     if (!lbl_net || !lv_obj_is_valid(lbl_net)) return;
     if (tianji_net_is_enabled()) {
-        if (s_current_view == TIANJI_VIEW_VOICE_LISTENING) {
-            if (tianji_voice_is_recording()) {
+        if (s_current_view == TIANJI_VIEW_AI) {
+            tianji_voice_state_t vs = tianji_voice_get_state();
+            if (vs == TIANJI_VOICE_STATE_RECORDING || vs == TIANJI_VOICE_STATE_CONNECTING) {
                 lv_obj_set_style_text_color(lbl_net, lv_color_hex(COLOR_CYAN), 0);
-                lv_label_set_text(lbl_net, "录音");
+                lv_label_set_text(lbl_net, "聆听");
+            } else if (vs == TIANJI_VOICE_STATE_PLAYING) {
+                lv_obj_set_style_text_color(lbl_net, lv_color_hex(COLOR_CYAN), 0);
+                lv_label_set_text(lbl_net, "诵读");
+            } else if (vs == TIANJI_VOICE_STATE_ERROR) {
+                lv_obj_set_style_text_color(lbl_net, lv_color_hex(COLOR_AMBER), 0);
+                lv_label_set_text(lbl_net, "受阻");
             } else {
                 lv_obj_set_style_text_color(lbl_net, lv_color_hex(COLOR_AMBER), 0);
-                lv_label_set_text(lbl_net, "解卦");
+                lv_label_set_text(lbl_net, "推演");
             }
         } else if (tianji_net_is_config_mode()) {
             lv_obj_set_style_text_color(lbl_net, lv_color_hex(COLOR_AMBER), 0);
             lv_label_set_text(lbl_net, "配网");
-        } else if (s_current_view == TIANJI_VIEW_AI && tianji_voice_is_playing()) {
-            lv_obj_set_style_text_color(lbl_net, lv_color_hex(COLOR_CYAN), 0);
-            lv_label_set_text(lbl_net, "诵读");
         } else {
             tianji_net_state_t st = tianji_net_get_state();
             if (st == TIANJI_NET_STATE_CONNECTED || st == TIANJI_NET_STATE_SUCCESS) {
@@ -526,174 +530,34 @@ static void render_view_reading(void) {
 }
 
 // ============================================================================
-// 界面 5: 占卜问卦页
+// 界面 5: 天机解卦页（无键多轮语音问答 + 断语文字同步上屏）
 // ============================================================================
-static void render_view_voice_listening(void) {
-    build_header(s_screen, "占卜问卦");
-
-    lv_obj_t *card = lv_obj_create(s_screen);
-    lv_obj_set_size(card, 216, 246);
-    lv_obj_set_pos(card, 12, 36);
-    lv_obj_set_style_bg_color(card, lv_color_hex(COLOR_PANEL), 0);
-    lv_obj_set_style_border_color(card, lv_color_hex(COLOR_BORDER), 0);
-    lv_obj_set_style_border_width(card, 1, 0);
-    lv_obj_set_style_pad_all(card, 12, 0);
-    lv_obj_set_scrollbar_mode(card, LV_SCROLLBAR_MODE_OFF);
-
-    tianji_voice_state_t st = tianji_voice_get_state();
-
-    if (st == TIANJI_VOICE_STATE_CONNECTING) {
-        lv_obj_t *title = lv_label_create(card);
-        lv_obj_set_style_text_font(title, &tianji_font_16, 0);
-        lv_obj_set_style_text_color(title, lv_color_hex(COLOR_CYAN), 0);
-        lv_label_set_text(title, "【正在连通...】");
-        lv_obj_set_pos(title, 0, 0);
-
-        lv_obj_t *desc = lv_label_create(card);
-        lv_obj_set_style_text_font(desc, &tianji_font_16, 0);
-        lv_obj_set_style_text_color(desc, lv_color_hex(COLOR_WHITE), 0);
-        lv_obj_set_width(desc, 192);
-        lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
-        lv_label_set_text(desc,
-            "正在连通天机算力网络……\n\n"
-            "待提示音响起后，请对准设备说话。");
-        lv_obj_set_pos(desc, 0, 32);
-
-        build_footer(s_screen, "正在建立连接，请稍候");
-    } else if (st == TIANJI_VOICE_STATE_UPLOADING) {
-        // 原“神思审度中……”改版为简明沉稳的“正在解卦...”
-        lv_obj_t *title = lv_label_create(card);
-        lv_obj_set_style_text_font(title, &tianji_font_16, 0);
-        lv_obj_set_style_text_color(title, lv_color_hex(COLOR_AMBER), 0);
-        lv_label_set_text(title, "【正在解卦...】");
-        lv_obj_set_pos(title, 0, 0);
-
-        lv_obj_t *desc = lv_label_create(card);
-        lv_obj_set_style_text_font(desc, &tianji_font_16, 0);
-        lv_obj_set_style_text_color(desc, lv_color_hex(COLOR_WHITE), 0);
-        lv_obj_set_width(desc, 192);
-        lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
-        const char *question = tianji_voice_get_question();
-        if (question && question[0] != '\0') {
-            lv_label_set_text_fmt(desc, "所问：%s\n\n正在结合卦象推演批断，请稍候……", question);
-        } else {
-            lv_label_set_text(desc,
-                "语音已上传。\n\n"
-                "正在结合卦象与您所测之事推演批断，请稍候……");
-        }
-        lv_obj_set_pos(desc, 0, 32);
-
-        build_footer(s_screen, "正在解卦，请稍候");
-    } else if (st == TIANJI_VOICE_STATE_ERROR) {
-        lv_obj_t *title = lv_label_create(card);
-        lv_obj_set_style_text_font(title, &tianji_font_16, 0);
-        lv_obj_set_style_text_color(title, lv_color_hex(COLOR_AMBER), 0);
-        lv_label_set_text(title, "【连接受阻】");
-        lv_obj_set_pos(title, 0, 0);
-
-        lv_obj_t *desc = lv_label_create(card);
-        lv_obj_set_style_text_font(desc, &tianji_font_16, 0);
-        lv_obj_set_style_text_color(desc, lv_color_hex(COLOR_WHITE), 0);
-        lv_obj_set_width(desc, 192);
-        lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
-        const char *err_text = tianji_voice_get_text_reply();
-        if (!err_text || strlen(err_text) == 0) {
-            err_text = "网关响应异常，请检查 Wi-Fi 热点并稍后重试。";
-        }
-        lv_label_set_text(desc, err_text);
-        lv_obj_set_pos(desc, 0, 32);
-
-        build_footer(s_screen, "按确定键返回总览");
-    } else {
-        // 正在录音
-        lv_obj_t *title = lv_label_create(card);
-        lv_obj_set_style_text_font(title, &tianji_font_16, 0);
-        lv_obj_set_style_text_color(title, lv_color_hex(COLOR_CYAN), 0);
-        lv_label_set_text(title, "【请说话...】");
-        lv_obj_set_pos(title, 0, 0);
-
-        lv_obj_t *desc = lv_label_create(card);
-        lv_obj_set_style_text_font(desc, &tianji_font_16, 0);
-        lv_obj_set_style_text_color(desc, lv_color_hex(COLOR_WHITE), 0);
-        lv_obj_set_width(desc, 192);
-        lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
-        lv_label_set_text(desc,
-            "请对准麦克风，说出所测之事\n"
-            "（如求财、事业、姻缘等）：");
-        lv_obj_set_pos(desc, 0, 30);
-
-        // 动态音量波形/能量指示
-        int vol = tianji_voice_get_current_volume();
-        lv_obj_t *bar_bg = lv_obj_create(card);
-        lv_obj_set_size(bar_bg, 192, 14);
-        lv_obj_set_pos(bar_bg, 0, 110);
-        lv_obj_set_style_bg_color(bar_bg, lv_color_hex(COLOR_MUTED), 0);
-        lv_obj_set_style_border_width(bar_bg, 0, 0);
-        lv_obj_set_style_radius(bar_bg, 3, 0);
-
-        int bar_w = (vol * 192) / 100;
-        if (bar_w < 6) bar_w = 6;
-        if (bar_w > 192) bar_w = 192;
-        lv_obj_t *bar_fill = lv_obj_create(bar_bg);
-        lv_obj_set_size(bar_fill, bar_w, 14);
-        lv_obj_set_pos(bar_fill, 0, 0);
-        lv_obj_set_style_bg_color(bar_fill, lv_color_hex(COLOR_CYAN), 0);
-        lv_obj_set_style_border_width(bar_fill, 0, 0);
-        lv_obj_set_style_radius(bar_fill, 3, 0);
-
-        lv_obj_t *hint = lv_label_create(card);
-        lv_obj_set_style_text_font(hint, &tianji_font_16, 0);
-        lv_obj_set_style_text_color(hint, lv_color_hex(COLOR_GRAY), 0);
-        lv_obj_set_width(hint, 192);
-        lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
-        lv_label_set_text(hint, "说完请按确定键，\n静音5秒亦将自动结束。");
-        lv_obj_set_pos(hint, 0, 140);
-
-        build_footer(s_screen, "说完请按确定键结束");
+static const char *voice_footer_prompt(void) {
+    switch (tianji_voice_get_state()) {
+    case TIANJI_VOICE_STATE_CONNECTING:
+        return "宗师接通中，请稍候";
+    case TIANJI_VOICE_STATE_RECORDING:
+        return "● 静听中，说完自动呈报";
+    case TIANJI_VOICE_STATE_UPLOADING:
+        return "宗师推演中…";
+    case TIANJI_VOICE_STATE_PLAYING:
+        return "诵读中，确定键打断追问";
+    case TIANJI_VOICE_STATE_ERROR:
+        return "按确定键重试，长按退出";
+    default:
+        return "确定键继续问，长按退出";
     }
 }
 
-// ============================================================================
-// 界面 6: 意图补充引导页 (need_more_info)
-// ============================================================================
-static void render_view_voice_retry(void) {
-    build_header(s_screen, "请指明所测");
-
-    lv_obj_t *card = lv_obj_create(s_screen);
-    lv_obj_set_size(card, 216, 246);
-    lv_obj_set_pos(card, 12, 36);
-    lv_obj_set_style_bg_color(card, lv_color_hex(COLOR_PANEL), 0);
-    lv_obj_set_style_border_color(card, lv_color_hex(COLOR_BORDER), 0);
-    lv_obj_set_style_border_width(card, 1, 0);
-    lv_obj_set_style_pad_all(card, 12, 0);
-    lv_obj_set_scrollbar_mode(card, LV_SCROLLBAR_MODE_OFF);
-
-    lv_obj_t *title = lv_label_create(card);
-    lv_obj_set_style_text_font(title, &tianji_font_16, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(COLOR_AMBER), 0);
-    lv_label_set_text(title, "【提示】");
-    lv_obj_set_pos(title, 0, 0);
-
-    lv_obj_t *desc = lv_label_create(card);
-    lv_obj_set_style_text_font(desc, &tianji_font_16, 0);
-    lv_obj_set_style_text_color(desc, lv_color_hex(COLOR_WHITE), 0);
-    lv_obj_set_width(desc, 192);
-    lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
-    const char *guide = tianji_voice_get_text_reply();
-    if (!guide || strlen(guide) == 0) {
-        guide = "卦无妄动，意在诚敬。所言未明心中所求，请指明欲测之事（如求财、事业、姻缘等），凝神后再禀。";
+static void scroll_ai_to_bottom(void) {
+    if (s_ai_card && lv_obj_is_valid(s_ai_card)) {
+        lv_obj_update_layout(s_ai_card);
+        lv_obj_scroll_by_bounded(s_ai_card, 0, -3000, LV_ANIM_OFF);
     }
-    lv_label_set_text(desc, guide);
-    lv_obj_set_pos(desc, 0, 28);
-
-    build_footer(s_screen, "按确定键重新说话");
 }
 
-// ============================================================================
-// 界面 7: 解卦结果呈现页
-// ============================================================================
 static void render_view_ai(void) {
-    build_header(s_screen, "解卦结果");
+    build_header(s_screen, "天机解卦");
 
     lv_obj_t *card = lv_obj_create(s_screen);
     s_ai_card = card;
@@ -708,29 +572,20 @@ static void render_view_ai(void) {
     lv_obj_t *content = lv_label_create(card);
     s_ai_label = content;
     lv_obj_set_style_text_font(content, &tianji_font_16, 0);
+    lv_obj_set_style_text_color(content, lv_color_hex(COLOR_WHITE), 0);
     lv_obj_set_width(content, 196);
     lv_label_set_long_mode(content, LV_LABEL_LONG_WRAP);
     lv_obj_set_pos(content, 0, 0);
-    lv_obj_set_style_text_color(content, lv_color_hex(COLOR_WHITE), 0);
 
-    const char *res = tianji_voice_get_text_reply();
-    if (!res || strlen(res) == 0) {
-        res = tianji_net_get_ai_result();
-    }
-
-    if (res && strlen(res) > 0) {
-        lv_label_set_text(content, res);
+    const char *text = tianji_voice_get_text_reply();
+    if (text && text[0] != '\0') {
+        lv_label_set_text(content, text);
     } else {
-        lv_label_set_text(content, "正在等候宗师开口……");
+        lv_label_set_text(content, "宗师正在接通……");
     }
 
-    if (tianji_voice_is_playing()) {
-        build_footer(s_screen, "按确定键静音，长按退出");
-        lv_obj_update_layout(card);
-        lv_obj_scroll_by_bounded(card, 0, -2000, LV_ANIM_OFF);
-    } else {
-        build_footer(s_screen, "确定键追问，长按返回");
-    }
+    build_footer(s_screen, voice_footer_prompt());
+    scroll_ai_to_bottom();
 }
 
 static void update_ai_text_in_place(void) {
@@ -739,19 +594,15 @@ static void update_ai_text_in_place(void) {
     }
     const char *text = tianji_voice_get_text_reply();
     if (!text || text[0] == '\0') {
-        text = "正在等候宗师开口……";
+        text = "宗师正在接通……";
     }
     lv_label_set_text(s_ai_label, text);
-    if (s_ai_card && lv_obj_is_valid(s_ai_card)) {
-        lv_obj_update_layout(s_ai_card);
-        if (tianji_voice_is_playing()) {
-            lv_obj_scroll_by_bounded(s_ai_card, 0, -2000, LV_ANIM_OFF);
-        }
-    }
+    scroll_ai_to_bottom();
     if (s_footer_label && lv_obj_is_valid(s_footer_label)) {
-        lv_label_set_text(s_footer_label,
-                          tianji_voice_is_playing() ? "按确定键静音，长按退出"
-                                                    : "确定键追问，长按返回");
+        lv_label_set_text(s_footer_label, voice_footer_prompt());
+    }
+    if (s_lbl_net && lv_obj_is_valid(s_lbl_net)) {
+        update_net_label(s_lbl_net);
     }
 }
 
@@ -761,57 +612,17 @@ static void on_voice_status_update(tianji_voice_state_t state, const char *msg) 
         return;
     }
 
-    switch (state) {
-        case TIANJI_VOICE_STATE_RECORDING:
-            // 通道真正就绪、开始上行录音时才提示“请说话”。
+    if (s_current_view != TIANJI_VIEW_AI) {
+        s_current_view = TIANJI_VIEW_AI;
+        refresh_view();
+    } else {
+        if (state == TIANJI_VOICE_STATE_RECORDING) {
+            // 麦克风真正打开时给一声轻提示，用户不必盯屏也知道可以开口。
             tianji_audio_play(TIANJI_SFX_START);
-            s_current_view = TIANJI_VIEW_VOICE_LISTENING;
-            refresh_view();
-            break;
-
-        case TIANJI_VOICE_STATE_UPLOADING:
-            if (s_current_view == TIANJI_VIEW_VOICE_LISTENING) {
-                // 已显示“正在解卦”，只需把刚识别出的事项补进页面。
-                refresh_view();
-            } else {
-                s_current_view = TIANJI_VIEW_VOICE_LISTENING;
-                refresh_view();
-            }
-            break;
-
-        case TIANJI_VOICE_STATE_PLAYING:
-            if (s_current_view != TIANJI_VIEW_AI) {
-                s_current_view = TIANJI_VIEW_AI;
-                refresh_view();
-            } else {
-                update_ai_text_in_place();
-            }
-            break;
-
-        case TIANJI_VOICE_STATE_SUCCESS:
-            if (s_current_view != TIANJI_VIEW_AI) {
-                s_current_view = TIANJI_VIEW_AI;
-                refresh_view();
-            } else {
-                update_ai_text_in_place();
-            }
-            break;
-
-        case TIANJI_VOICE_STATE_NEED_MORE:
-            s_current_view = TIANJI_VIEW_VOICE_RETRY;
+        } else if (state == TIANJI_VOICE_STATE_ERROR) {
             tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
-            refresh_view();
-            break;
-
-        case TIANJI_VOICE_STATE_ERROR:
-            s_current_view = TIANJI_VIEW_VOICE_LISTENING;
-            tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
-            refresh_view();
-            break;
-
-        default:
-            refresh_view();
-            break;
+        }
+        update_ai_text_in_place();
     }
 
     bsp_lvgl_unlock();
@@ -841,12 +652,6 @@ static void refresh_view(void) {
         break;
     case TIANJI_VIEW_AI:
         render_view_ai();
-        break;
-    case TIANJI_VIEW_VOICE_LISTENING:
-        render_view_voice_listening();
-        break;
-    case TIANJI_VIEW_VOICE_RETRY:
-        render_view_voice_retry();
         break;
     default:
         render_view_standby();
@@ -949,12 +754,12 @@ void tianji_ui_handle_key(tianji_key_action_t action) {
 
     case TIANJI_VIEW_OVERVIEW:
         if (action == TIANJI_KEY_OK_CLICK) {
-            // 单按确定键：确保网络使能，切入【占卜问卦】启动语音解卦
+            // 单按确定键：直接进入解卦页并开始聆听，不再经过“请说话”中间页。
             if (!tianji_net_is_enabled()) {
                 tianji_net_set_enabled(true);
             }
-            s_current_view = TIANJI_VIEW_VOICE_LISTENING;
-            s_voice_listening_enter_us = esp_timer_get_time();
+            s_current_view = TIANJI_VIEW_AI;
+            s_ai_enter_us = esp_timer_get_time();
             refresh_view();
             tianji_voice_start(&s_session, on_voice_status_update);
         } else if (action == TIANJI_KEY_DOWN_CLICK) {
@@ -965,59 +770,6 @@ void tianji_ui_handle_key(tianji_key_action_t action) {
         } else if (action == TIANJI_KEY_OK_LONG) {
             s_current_view = TIANJI_VIEW_STANDBY;
             tianji_audio_play(TIANJI_SFX_START);
-            refresh_view();
-        }
-        break;
-
-    case TIANJI_VIEW_VOICE_LISTENING:
-        if (action == TIANJI_KEY_OK_CLICK) {
-            // 核心安全保护：进入页面 1.5 秒内，坚决屏蔽任何按键结束！
-            // 彻底消除由总览页按下进入后、按键释放或机械弹跳产生的残留 CLICK 瞬间中断录音的致命隐患！
-            int64_t elapsed_ms = (esp_timer_get_time() - s_voice_listening_enter_us) / 1000;
-            if (elapsed_ms < 1500) {
-                ESP_LOGI(TAG, "录音刚进入冷却保护期 (%lld ms < 1500ms)，屏蔽误触按键", (long long)elapsed_ms);
-                break;
-            }
-            tianji_voice_state_t st = tianji_voice_get_state();
-            if (st == TIANJI_VOICE_STATE_CONNECTING) {
-                // 通道尚未就绪，此时提交会让桥接层停在“请稍候”。
-                ESP_LOGI(TAG, "语音通道仍在连接，本次按键不提交，等待就绪提示音");
-                break;
-            }
-            if (tianji_voice_is_recording()) {
-                // 用户在说话后主动按确定键提前提交：播放完成音效并停止录音
-                tianji_audio_play(TIANJI_SFX_HEX_COMPLETE);
-                tianji_voice_stop_recording();
-                refresh_view();
-            } else if (st == TIANJI_VOICE_STATE_ERROR) {
-                s_current_view = TIANJI_VIEW_OVERVIEW;
-                tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
-                refresh_view();
-            }
-        } else if (action == TIANJI_KEY_OK_LONG) {
-            tianji_voice_end();
-            s_current_view = TIANJI_VIEW_STANDBY;
-            tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
-            refresh_view();
-        }
-        break;
-
-    case TIANJI_VIEW_VOICE_RETRY:
-        if (action == TIANJI_KEY_OK_CLICK) {
-            tianji_voice_stop_playing();
-            s_current_view = TIANJI_VIEW_VOICE_LISTENING;
-            s_voice_listening_enter_us = esp_timer_get_time();
-            refresh_view();
-            tianji_voice_start(&s_session, on_voice_status_update);
-        } else if (action == TIANJI_KEY_DOWN_CLICK) {
-            tianji_voice_stop_playing();
-            s_current_view = TIANJI_VIEW_OVERVIEW;
-            tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
-            refresh_view();
-        } else if (action == TIANJI_KEY_OK_LONG) {
-            tianji_voice_end();
-            s_current_view = TIANJI_VIEW_STANDBY;
-            tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
             refresh_view();
         }
         break;
@@ -1046,32 +798,59 @@ void tianji_ui_handle_key(tianji_key_action_t action) {
         }
         break;
 
-    case TIANJI_VIEW_AI:
-        if (tianji_voice_is_playing()) {
-            if (action == TIANJI_KEY_OK_CLICK || action == TIANJI_KEY_DOWN_CLICK) {
-                tianji_voice_stop_playing();
-                update_ai_text_in_place();
-                return;
-            }
-        }
+    case TIANJI_VIEW_AI: {
+        tianji_voice_state_t st = tianji_voice_get_state();
 
-        if (action == TIANJI_KEY_DOWN_CLICK) {
-            if (s_ai_card) lv_obj_scroll_by_bounded(s_ai_card, 0, -40, LV_ANIM_ON);
-        } else if (action == TIANJI_KEY_UP_CLICK) {
-            if (s_ai_card) lv_obj_scroll_by_bounded(s_ai_card, 0, 40, LV_ANIM_ON);
-        } else if (action == TIANJI_KEY_OK_CLICK) {
-            // 多轮追问：不清空小智会话，直接在同一通道再次开口。
-            s_current_view = TIANJI_VIEW_VOICE_LISTENING;
-            s_voice_listening_enter_us = esp_timer_get_time();
-            refresh_view();
-            tianji_voice_start(&s_session, on_voice_status_update);
-        } else if (action == TIANJI_KEY_OK_LONG) {
+        if (action == TIANJI_KEY_OK_LONG) {
             tianji_voice_end();
             s_current_view = TIANJI_VIEW_OVERVIEW;
             tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
             refresh_view();
+            break;
+        }
+
+        if (action == TIANJI_KEY_DOWN_CLICK) {
+            if (s_ai_card) lv_obj_scroll_by_bounded(s_ai_card, 0, -40, LV_ANIM_ON);
+            break;
+        }
+        if (action == TIANJI_KEY_UP_CLICK) {
+            if (s_ai_card) lv_obj_scroll_by_bounded(s_ai_card, 0, 40, LV_ANIM_ON);
+            break;
+        }
+        if (action != TIANJI_KEY_OK_CLICK) {
+            break;
+        }
+
+        // 从总览页按下的那一下，按键释放/弹跳可能再送一个 CLICK，进入后 1.5 秒内忽略。
+        const int64_t elapsed_ms = (esp_timer_get_time() - s_ai_enter_us) / 1000;
+        if (elapsed_ms < 1500) {
+            ESP_LOGI(TAG, "解卦页刚进入 (%d ms < 1500ms)，忽略本次按键", (int)elapsed_ms);
+            break;
+        }
+
+        if (st == TIANJI_VOICE_STATE_RECORDING) {
+            // 已说完，提前呈报（不说也可以继续说，静音 5 秒会自动呈报）。
+            tianji_voice_stop_recording();
+        } else if (st == TIANJI_VOICE_STATE_PLAYING) {
+            // 打断诵读并立即开口追问（与小智原生交互一致）。
+            tianji_voice_stop_playing();
+            tianji_voice_followup();
+            update_ai_text_in_place();
+        } else if (st == TIANJI_VOICE_STATE_CONNECTING ||
+                   st == TIANJI_VOICE_STATE_UPLOADING) {
+            ESP_LOGI(TAG, "语音通道忙碌中，本次按键忽略");
+        } else if (st == TIANJI_VOICE_STATE_NEED_MORE) {
+            tianji_voice_followup();
+        } else if (st == TIANJI_VOICE_STATE_ERROR) {
+            // 出错后重新开一轮（保留已显示的问与答）。
+            tianji_voice_followup();
+        } else {
+            // 空闲：直接继续追问，无需任何额外按键。
+            s_ai_enter_us = esp_timer_get_time();
+            tianji_voice_followup();
         }
         break;
+    }
 
     default:
         break;
