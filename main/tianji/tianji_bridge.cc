@@ -82,6 +82,10 @@ int64_t s_record_start_us = 0;
 int64_t s_last_pulse_us = 0;
 uint32_t s_voice_run_ticks = 0;
 bool s_gap_announced = false;
+// 空轮（用户没开口）虽然本地不"提交"，但音频早已随聆听一起上行，
+// 服务端仍会对这 5 秒噪声跑一遍识别并作答。置位后丢弃这一轮的服务端消息。
+bool s_discard_turn = false;
+int64_t s_discard_since_us = 0;
 bool s_vad_active = false;
 esp_timer_handle_t s_watchdog = nullptr;
 
@@ -170,6 +174,7 @@ static void ResetRoundState(void) {
     s_last_tts_us = 0;
     s_last_pulse_us = 0;
     s_gap_announced = false;
+    s_discard_turn = false;
     s_last_voice_us = esp_timer_get_time();
 }
 
@@ -270,6 +275,11 @@ static void FinishListeningRound(bool user_pressed) {
     if (!s_round_voice_heard) {
         ESP_LOGI(TAG, "本轮未检测到人声，结束聆听且不提交空录音");
         s_followup_pending = false;
+        // 上行音频已经发出去了，服务端很快还会回一轮"幻觉识别"。
+        // 先打断它，并在本轮结束前丢弃这条通道上收到的所有 STT/TTS。
+        s_discard_turn = true;
+        s_discard_since_us = esp_timer_get_time();
+        Application::GetInstance().AbortSpeaking(kAbortReasonNone);
         app.StopListening();
         EnterPhase(Phase::kIdle, "静候追问");
         return;
@@ -287,6 +297,11 @@ static void WatchdogTick(void* arg) {
         return;
     }
     if (s_phase == Phase::kIdle) {
+        // 空轮丢弃最多持续 4 秒：服务端既没回 tts_stop 也不会把标记留到下一轮。
+        if (s_discard_turn && (esp_timer_get_time() - s_discard_since_us) > 4 * 1000 * 1000) {
+            ESP_LOGI(TAG, "空轮丢弃超时，恢复接收服务端消息");
+            s_discard_turn = false;
+        }
         MaybeStartFollowUp();
         return;
     }
@@ -596,6 +611,10 @@ void tianji_bridge_set_net_state(tianji_net_state_t state) {
 
 void tianji_bridge_on_stt_text(const char *text) {
     if (!text || text[0] == '\0') return;
+    if (s_discard_turn) {
+        ESP_LOGI(TAG, "丢弃空轮的服务端识别结果: %s", text);
+        return;
+    }
     if (IsToolCallArtifact(text)) {
         ESP_LOGW(TAG, "忽略疑似工具调用的识别文本");
         return;
@@ -625,6 +644,11 @@ void tianji_bridge_on_stt_text(const char *text) {
 }
 
 void tianji_bridge_on_tts_start(void) {
+    if (s_discard_turn) {
+        // 空轮触发的服务端作答：立刻掐掉，别让宗师念一段跟噪声的对话。
+        Application::GetInstance().AbortSpeaking(kAbortReasonNone);
+        return;
+    }
     if (s_phase == Phase::kIdle || s_phase == Phase::kError) {
         return;
     }
@@ -633,6 +657,9 @@ void tianji_bridge_on_tts_start(void) {
 
 void tianji_bridge_on_tts_sentence(const char *text) {
     if (!text || text[0] == '\0') return;
+    if (s_discard_turn) {
+        return;
+    }
     if (IsToolCallArtifact(text)) {
         ESP_LOGW(TAG, "忽略工具调用残留句子: %s", text);
         return;
@@ -656,6 +683,11 @@ void tianji_bridge_on_tts_sentence(const char *text) {
 }
 
 void tianji_bridge_on_tts_stop(void) {
+    if (s_discard_turn) {
+        ESP_LOGI(TAG, "空轮服务端作答结束，已整轮丢弃");
+        s_discard_turn = false;
+        return;
+    }
     if (s_phase != Phase::kSpeaking && s_phase != Phase::kWaiting) {
         return;
     }
