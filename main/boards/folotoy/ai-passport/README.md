@@ -1,3 +1,5 @@
+**English** · [简体中文](/main/boards/folotoy/ai-passport/README.zh_CN.md)
+
 # FoloToy AI Passport (ai-passport)
 
 Board definition that lets the XiaoZhi voice assistant run on the

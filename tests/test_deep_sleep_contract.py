@@ -53,7 +53,10 @@ class DeepSleepContractTest(unittest.TestCase):
         cls.battery = read("components/bsp/src/bsp_battery.c")
         cls.display = read("components/bsp/src/bsp_display.c")
         cls.i2c = read("components/bsp/src/bsp_i2c.c")
-        cls.demo = read("main/demo_low_power.c")
+        # The terminal shutdown used to live in main/demo_low_power.c's sleep_task.
+        # This branch carries the AI Passport board instead, so the same ordering
+        # contract is checked against AiPassportBoard::EnterDeepSleep.
+        cls.demo = read("main/boards/folotoy/ai-passport/ai_passport_board.cc")
 
     def test_es8311_force_sleep_sequence_is_complete_and_ordered(self) -> None:
         expected = [
@@ -139,19 +142,24 @@ class DeepSleepContractTest(unittest.TestCase):
                         init.index("spi_bus_initialize"))
 
     def test_terminal_shutdown_order_precedes_deep_sleep(self) -> None:
-        body = function_body(self.demo, "sleep_task")
+        body = function_body(self.demo, "EnterDeepSleep")
         calls = [
-            "bsp_battery_sleep()",
-            "bsp_audio_sleep()",
-            "bsp_audio_prepare_deep_sleep()",
-            "bsp_i2c_prepare_deep_sleep()",
-            "bsp_display_prepare_deep_sleep()",
+            "PrepareWakeupSource()",
+            "battery_->EnterSleep()",
+            "SuspendAudio()",
+            "ReleasePins(AUDIO_PINS",
+            "ReleasePins(I2C_PINS",
+            "PrepareDisplayForDeepSleep()",
             "esp_deep_sleep_start()",
         ]
         positions = [body.index(call) for call in calls]
         self.assertEqual(positions, sorted(positions))
-        self.assertLess(body.index("bsp_lvgl_lock(1000)"),
-                        body.index("bsp_display_prepare_deep_sleep()"))
+        # A failure after the pins are released must never leave the device awake,
+        # and the panel is taken down under the display lock.
+        self.assertIn("esp_restart()", body)
+        display_body = function_body(self.demo, "PrepareDisplayForDeepSleep")
+        self.assertLess(display_body.index("DisplayLockGuard lock(display_)"),
+                        display_body.index("esp_lcd_panel_disp_on_off(panel_, false)"))
 
 
 if __name__ == "__main__":

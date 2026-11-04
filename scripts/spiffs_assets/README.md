@@ -1,23 +1,26 @@
-# SPIFFS Assets Builder
+**English** · [简体中文](/scripts/spiffs_assets/README.zh_CN.md)
 
-这个脚本用于构建 ESP32 项目的 SPIFFS 资源分区，将各种资源文件打包成可在设备上使用的格式。
+# SPIFFS assets builder
 
-## 功能特性
+This script builds the SPIFFS partition image of an ESP32 project, packing the
+resource files into formats the device can use.
 
-- 处理唤醒网络模型 (WakeNet Model)
-- 集成文本字体文件
-- 处理表情符号图片集合
-- 自动生成资源索引文件
-- 打包生成最终的 `assets.bin` 文件
+## Features
 
-## 依赖要求
+- Processes the wake-word network model (WakeNet)
+- Integrates text font files
+- Processes the emoji image collection
+- Generates the resource index
+- Packs the final `assets.bin`
+
+## Requirements
 
 - Python 3.6+
-- 相关资源文件
+- The resource files themselves
 
-## 使用方法
+## Usage
 
-### 基本语法
+### Syntax
 
 ```bash
 ./build.py --wakenet_model <wakenet_model_dir> \
@@ -25,86 +28,81 @@
     --emoji_collection <emoji_collection_dir>
 ```
 
-### 参数说明
+### Options
 
-| 参数 | 类型 | 必需 | 说明 |
-|------|------|------|------|
-| `--wakenet_model` | 目录路径 | 否 | 唤醒网络模型目录路径 |
-| `--text_font` | 文件路径 | 否 | 文本字体文件路径 |
-| `--emoji_collection` | 目录路径 | 否 | 表情符号图片集合目录路径 |
+| Option | Type | Required | Description |
+| --- | --- | --- | --- |
+| `--wakenet_model` | directory | no | Wake-word network model directory |
+| `--text_font` | file | no | Text font file |
+| `--emoji_collection` | directory | no | Emoji image collection directory |
 
-### 使用示例
+### Examples
 
 ```bash
-# 完整参数示例
+# all options
 ./build.py \
     --wakenet_model ../../managed_components/espressif__esp-sr/model/wakenet_model/wn9_nihaoxiaozhi_tts \
     --text_font ../../components/noto-fonts/cbin/font_noto_sans_common_20_4.bin \
     --emoji_collection ../../components/noto-fonts/png/noto-color-emoji_64/
 
-# 仅处理字体文件
+# font only
 ./build.py --text_font ../../components/noto-fonts/cbin/font_noto_sans_common_20_4.bin
 
-# 仅处理表情符号
+# emoji only
 ./build.py --emoji_collection ../../components/noto-fonts/png/noto-color-emoji_64/
 ```
 
-## 工作流程
+## Workflow
 
-1. **创建构建目录结构**
-   - `build/` - 主构建目录
-   - `build/assets/` - 资源文件目录
-   - `build/output/` - 输出文件目录
+1. **Lay out the build directories**
+   - `build/` - main build directory
+   - `build/assets/` - resource files
+   - `build/output/` - output files
+2. **Process the wake-word network model**
+   - Copy the model files into the build directory
+   - Generate `srmodels.bin` with `pack_model.py`
+   - Copy the generated model files into the resource directory
+3. **Process the text font**
+   - Copy the font file into the resource directory
+   - `.bin` font files are supported
+4. **Process the emoji collection**
+   - Scan the given directory for images
+   - `.png` and `.gif` are supported
+   - Generate the emoji index
+5. **Generate the configuration files**
+   - `index.json` - resource index
+   - `config.json` - build configuration
+6. **Pack the final resources**
+   - Generate `assets.bin` with `spiffs_assets_gen.py`
+   - Copy it to the build root
 
-2. **处理唤醒网络模型**
-   - 复制模型文件到构建目录
-   - 使用 `pack_model.py` 生成 `srmodels.bin`
-   - 将生成的模型文件复制到资源目录
+## Output
 
-3. **处理文本字体**
-   - 复制字体文件到资源目录
-   - 支持 `.bin` 格式的字体文件
+After a successful build, `build/` contains:
 
-4. **处理表情符号集合**
-   - 扫描指定目录中的图片文件
-   - 支持 `.png` 和 `.gif` 格式
-   - 自动生成表情符号索引
+- `assets/` - all resource files
+- `assets.bin` - the final SPIFFS image
+- `config.json` - build configuration
+- `output/` - intermediate output
 
-5. **生成配置文件**
-   - `index.json` - 资源索引文件
-   - `config.json` - 构建配置文件
+## Supported formats
 
-6. **打包最终资源**
-   - 使用 `spiffs_assets_gen.py` 生成 `assets.bin`
-   - 复制到构建根目录
+- **Model files**: `.bin` (processed through `pack_model.py`)
+- **Font files**: `.bin`
+- **Images**: `.png`, `.gif`
+- **Configuration**: `.json`
 
-## 输出文件
+## Error handling
 
-构建完成后，会在 `build/` 目录下生成以下文件：
+The script reports failing preconditions instead of guessing:
 
-- `assets/` - 所有资源文件
-- `assets.bin` - 最终的 SPIFFS 资源文件
-- `config.json` - 构建配置
-- `output/` - 中间输出文件
+- Checks whether the source file/directory exists
+- Verifies subprocess results
+- Prints detailed errors and warnings
 
-## 支持的资源格式
+## Notes
 
-- **模型文件**: `.bin` (通过 pack_model.py 处理)
-- **字体文件**: `.bin`
-- **图片文件**: `.png`, `.gif`
-- **配置文件**: `.json`
-
-## 错误处理
-
-脚本包含完善的错误处理机制：
-
-- 检查源文件/目录是否存在
-- 验证子进程执行结果
-- 提供详细的错误信息和警告
-
-## 注意事项
-
-1. 确保所有依赖的 Python 脚本都在同一目录下
-2. 资源文件路径使用绝对路径或相对于脚本目录的路径
-3. 构建过程会清理之前的构建文件
-4. 生成的 `assets.bin` 文件大小受 SPIFFS 分区大小限制
+1. Keep all dependent Python scripts in the same directory as this one.
+2. Resource paths may be absolute or relative to the script directory.
+3. The build cleans previous build files.
+4. The size of `assets.bin` is bounded by the SPIFFS partition size.

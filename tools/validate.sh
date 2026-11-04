@@ -24,19 +24,18 @@ run_static_checks() {
     "${actionlint_bin}" -color .github/workflows/*.yml
 
     test_dir="$(mktemp -d /tmp/ai-passport-host-tests.XXXXXX)"
-    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
-        tests/test_ui_pixel_math.c main/ui_pixel_math.c \
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain -Imain/tianji \
+        tests/test_ui_pixel_math.c main/tianji/ui_pixel_math.c \
         -o "${test_dir}/test_ui_pixel_math"
     "${test_dir}/test_ui_pixel_math"
-    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
-        tests/test_tianji_logic.c main/tianji_logic.c \
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain -Imain/tianji \
+        tests/test_tianji_logic.c main/tianji/tianji_logic.c \
         -o "${test_dir}/test_tianji_logic"
     "${test_dir}/test_tianji_logic"
-    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
-        tests/test_demo_navigation.c main/demo_navigation.c \
-        -o "${test_dir}/test_demo_navigation"
-    "${test_dir}/test_demo_navigation"
-    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+    # tests/test_demo_navigation.c covers main/demo_navigation.c, which no longer
+    # exists in this tree (the demo menu was replaced by the tianji screen), so the
+    # block is intentionally skipped instead of pointing at a missing source.
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain -Imain/tianji \
         tests/test_key_guard.c -o "${test_dir}/test_key_guard"
     "${test_dir}/test_key_guard"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Icomponents/bsp/src \
@@ -69,13 +68,9 @@ run_static_checks() {
     if [[ "$(uname -s)" == "Darwin" ]]; then
         gc_flag="-Wl,-dead_strip"
     fi
-    for demo in audio low_power ble wifi; do
-        "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
-            -ffunction-sections -fdata-sections -Itests/demo_stubs -Imain \
-            "tests/test_demo_${demo}_runtime.c" ${gc_flag} \
-            -o "${test_dir}/test_demo_${demo}_runtime"
-        "${test_dir}/test_demo_${demo}_runtime"
-    done
+    # The demo_*.c sources these four runtime tests compile in were replaced by the
+    # tianji/xiaozhi firmware in this branch, so the tests and their build loop are
+    # gone rather than pointing at sources that no longer exist.
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_battery_profile.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_deep_sleep_contract.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_key_wake_contract.py

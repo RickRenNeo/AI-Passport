@@ -1,36 +1,43 @@
-# ogg_covertor 小智AI OGG 音效批量转换器
+**English** · [简体中文](/scripts/ogg_converter/README.zh_CN.md)
 
-本脚本为OGG批量转换工具，支持将输入的音频文件转换为小智可使用的OGG格式
+# ogg_converter: batch OGG converter for the assistant sound effects
 
-基于Python第三方库 `ffmpeg-python` 实现，**需要** `ffmpeg` 环境  
+This script batch-converts input audio into the OGG format used by the
+assistant.
 
-可前往[此处](https://ffmpeg.org/download.html)下载对应你自己系统的ffmpeg发行版，并添加到环境变量或者放在脚本所在目录
+It is built on the Python library `ffmpeg-python`, so an `ffmpeg` environment is
+**required**. Download a build for your system
+[here](https://ffmpeg.org/download.html) and either add it to `PATH` or place it
+next to this script.
 
-支持OGG和音频之间的互转，响度调节等功能
+Features include OGG <-> audio conversion and loudness normalisation.
 
-# 创建并激活虚拟环境
+## Create and activate a virtual environment
 
 ```bash
-# 创建虚拟环境
+# create the virtual environment
 python -m venv venv
-# 激活虚拟环境
-source venv/bin/activate # Mac/Linux
-venv\Scripts\activate # Windows
+# activate it
+source venv/bin/activate  # Mac/Linux
+venv\Scripts\activate     # Windows
 ```
-# 下载FFmpeg
-前往[此处](https://ffmpeg.org/download.html)下载ffmpeg  
 
-根据你当前的系统下载对应的版本，并将`ffmpeg`的可执行文件放置在脚本所在目录或者添加可执行文件所在目录到环境变量
+## Install ffmpeg
 
-# 安装依赖
-请在虚拟环境中执行
+Download ffmpeg [here](https://ffmpeg.org/download.html), pick the build for your
+system, and either place the `ffmpeg` executable in this directory or add its
+directory to `PATH`.
+
+## Install the dependencies
+
+Run inside the virtual environment:
 
 ```bash
 pip install ffmpeg-python
 ```
 
-# 运行脚本
+## Run the script
+
 ```bash
 python ogg_covertor.py
 ```
-

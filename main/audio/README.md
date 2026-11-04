@@ -1,3 +1,5 @@
+**English** · [简体中文](/main/audio/README.zh_CN.md)
+
 # Audio Service Architecture
 
 `AudioService` owns one input engine and keeps codec I/O, Opus encoding/decoding,
