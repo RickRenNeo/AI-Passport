@@ -617,7 +617,10 @@ void tianji_bridge_on_tts_stop(void) {
         return;
     }
     if (!s_round_answered) {
-        FailRound("未收到宗师断语，请重试。");
+        // 服务端只发了 tts start/stop（例如刚被打断）时不要弹失败页，安静收尾即可。
+        ESP_LOGW(TAG, "本轮未见断语，直接收尾");
+        s_followup_pending = false;
+        EnterPhase(Phase::kIdle, "宗师未应，可再问");
         return;
     }
     ESP_LOGI(TAG, "宗师诵读结束，共 %u 字节", (unsigned)strlen(s_transcript));
