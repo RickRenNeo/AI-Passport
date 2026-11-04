@@ -541,7 +541,8 @@ static const char *voice_footer_prompt(void) {
     case TIANJI_VOICE_STATE_UPLOADING:
         return "宗师推演中…";
     case TIANJI_VOICE_STATE_PLAYING:
-        return "诵读中，确定键打断追问";
+        return tianji_voice_is_waiting_sentence() ? "宗师思索中，请稍候"
+                                                  : "诵读中，确定键打断追问";
     case TIANJI_VOICE_STATE_ERROR:
         return "按确定键重试，长按退出";
     default:
@@ -616,12 +617,11 @@ static void on_voice_status_update(tianji_voice_state_t state, const char *msg) 
         s_current_view = TIANJI_VIEW_AI;
         refresh_view();
     } else {
-        if (state == TIANJI_VOICE_STATE_RECORDING) {
-            // 麦克风真正打开时给一声轻提示，用户不必盯屏也知道可以开口。
-            tianji_audio_play(TIANJI_SFX_START);
-        } else if (state == TIANJI_VOICE_STATE_ERROR) {
+        if (state == TIANJI_VOICE_STATE_ERROR) {
             tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
         }
+        // 开麦时不要再播放提示音：喇叭就在麦克风旁边，尾音会被当成"用户开口"，
+        // 导致没说话也被提交一轮空录音。开麦只靠屏幕底部的"静听中"提示。
         update_ai_text_in_place();
     }
 

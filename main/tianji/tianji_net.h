@@ -92,6 +92,8 @@ const char *tianji_voice_get_question(void);
 tianji_voice_state_t tianji_voice_get_state(void);
 bool tianji_voice_is_recording(void);
 bool tianji_voice_is_playing(void);
+// 断语是否正处于"服务端迟迟没下发下一句"的长停顿（用于界面提示与解释）
+bool tianji_voice_is_waiting_sentence(void);
 
 // 获取当前录音音量等级 (0..100)
 int tianji_voice_get_current_volume(void);

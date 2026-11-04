@@ -65,19 +65,22 @@ enum class Phase {
 constexpr int64_t kTickUs = 100 * 1000;             // 100 ms 看门狗
 constexpr int64_t kSilenceStopUs = 2 * 1000 * 1000; // 说话结束后静音 2 秒自动呈报（贴近小智原生 VAD）
 constexpr int64_t kNoVoiceWaitUs = 5 * 1000 * 1000; // 一直没开口：5 秒后自动收起麦克风，不提交空录音
-constexpr int64_t kMaxRecordUs = 20 * 1000 * 1000;  // 单轮录音硬上限
+constexpr int64_t kMaxRecordUs = 12 * 1000 * 1000;  // 单轮录音硬上限
 constexpr int64_t kConnectTimeoutUs = 15 * 1000 * 1000;
-constexpr int64_t kAnswerTimeoutUs = 30 * 1000 * 1000;
+constexpr int64_t kAnswerTimeoutUs = 8 * 1000 * 1000;   // 提交后 8 秒内连 STT 都没回，判定本轮空转
 constexpr int64_t kFollowupDelayUs = 300 * 1000;    // 断语播毕后稍等再开麦
 constexpr int64_t kFollowupDrainWaitUs = 8 * 1000 * 1000; // 等播放队列排空的兜底
 constexpr int64_t kVoiceRunTicksNeeded = 3;         // 连续 300 ms 人声才算真的开了口
+constexpr int64_t kMicSettleUs = 1200 * 1000;       // 开麦后的自噪声/回声屏蔽窗
 
 Phase s_phase = Phase::kIdle;
 int64_t s_phase_since_us = 0;
 int64_t s_last_voice_us = 0;
 int64_t s_submit_us = 0;
 int64_t s_last_tts_us = 0;
+int64_t s_record_start_us = 0;
 uint32_t s_voice_run_ticks = 0;
+bool s_gap_announced = false;
 bool s_vad_active = false;
 esp_timer_handle_t s_watchdog = nullptr;
 
@@ -164,6 +167,7 @@ static void ResetRoundState(void) {
     s_voice_run_ticks = 0;
     s_submit_us = 0;
     s_last_tts_us = 0;
+    s_gap_announced = false;
     s_last_voice_us = esp_timer_get_time();
 }
 
@@ -290,7 +294,10 @@ static void WatchdogTick(void* arg) {
             if (device_state == kDeviceStateListening) {
                 s_vad_active = false;
                 s_round_voice_heard = false;
+                s_voice_run_ticks = 0;
                 s_last_voice_us = now;
+                // 开麦瞬间的自噪声（提示音尾音、I2S 启动瞬态）不算人声。
+                s_record_start_us = now;
                 EnterPhase(Phase::kRecording, "【请对准设备陈述所测之事...】");
             } else if (device_state == kDeviceStateIdle && phase_ms > 2000) {
                 FailRound("无法连接小智语音服务，请检查网络后重试。");
@@ -306,7 +313,7 @@ static void WatchdogTick(void* arg) {
                 FailRound("语音通道已断开，请重试。");
                 break;
             }
-            const bool voice = app.IsVoiceDetected();
+            const bool voice = app.IsVoiceDetected() && (now - s_record_start_us) > kMicSettleUs;
             if (voice != s_vad_active) {
                 s_vad_active = voice;
                 ESP_LOGI(TAG, "VAD %s", voice ? "检测到人声" : "静音");
@@ -351,6 +358,12 @@ static void WatchdogTick(void* arg) {
             // TTS 播放由服务端 tts stop 收尾；这里只做超长兜底。
             if (phase_ms > 120 * 1000) {
                 FailRound("宗师回应超时，请重试。");
+            } else if (!s_gap_announced && s_last_tts_us != 0 &&
+                       (now - s_last_tts_us) > 6 * 1000 * 1000) {
+                // 服务端逐句合成偶尔会停几十秒，先给用户一个"仍在思索"的交代。
+                s_gap_announced = true;
+                ESP_LOGI(TAG, "断语句间停顿超过 6 秒，提示宗师思索中");
+                NotifyUi(TIANJI_VOICE_STATE_PLAYING, "宗师思索中");
             }
             break;
 
@@ -442,9 +455,9 @@ static std::string BuildHexagramContext() {
     if (primary->relationship) {
         append("姻缘参考：%s\n", primary->relationship);
     }
-    append("【作答要求】结合求测者所问，用口语化中文直接断吉凶，再点事业/财运/姻缘要点，"
-           "最后给一条可执行建议。全文控制在 120 字以内，分 3~4 个短句，每句不超过 25 字，"
-           "句与句要一气呵成（本机边生成边播报，句子过长或长间隔会造成语音断续）。"
+    append("【作答要求】用口语化中文直接断吉凶，再点一条最要紧的可执行建议。"
+           "全文不得超过 80 字，只写 2~3 个短句，每句不超过 25 字。"
+           "本机边生成边播报，句子越多、句子越长，语音停顿越明显，必须短。"
            "不要念出本段格式说明，也不要输出任何英文、符号或工具名。");
     return text;
 }
@@ -456,7 +469,8 @@ static void RegisterHexagramTool() {
         "同时带回本页此前的问答记录。"
         "当用户询问占卜、解卦、问卦、求测事业/财运/姻缘/吉凶，或要求详细解释、追问、复述上文时，"
         "必须先调用本工具获取卦象与上文，再作答。收到请求后请立即调用，调用前不要输出任何寒暄、"
-        "过渡语、百分号或工具名。严禁在未调用本工具时凭空编造卦象或复述上文。",
+        "过渡语、百分号或工具名。作答必须控制在 80 字以内、2~3 个短句（本机语音逐句播报，"
+        "长答案会造成长时间停顿）。严禁在未调用本工具时凭空编造卦象或复述上文。",
         PropertyList(), [](const PropertyList&) -> ToolResult {
             std::string context = BuildHexagramContext();
             ESP_LOGI(TAG, "服务端 LLM 调取卦象上下文 (%u 字节)", (unsigned)context.size());
@@ -604,6 +618,7 @@ void tianji_bridge_on_tts_sentence(const char *text) {
         ESP_LOGI(TAG, "断语句间隔 %d ms", static_cast<int>((now - s_last_tts_us) / 1000));
     }
     s_last_tts_us = now;
+    s_gap_announced = false;
     s_round_answered = true;
     AppendTranscript(text);
     s_phase = Phase::kSpeaking;
@@ -762,6 +777,13 @@ bool tianji_voice_is_recording(void) {
 
 bool tianji_voice_is_playing(void) {
     return s_phase == Phase::kSpeaking;
+}
+
+bool tianji_voice_is_waiting_sentence(void) {
+    if (s_phase != Phase::kSpeaking || s_last_tts_us == 0) {
+        return false;
+    }
+    return (esp_timer_get_time() - s_last_tts_us) > 6 * 1000 * 1000;
 }
 
 int tianji_voice_get_current_volume(void) {
