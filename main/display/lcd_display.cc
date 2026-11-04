@@ -761,7 +761,7 @@ void LcdDisplay::SetupUI() {
     // AI Passport 掌机专用：由《天机·六爻》周易推演全屏国风主界面完全接管，不创建小智原生聊天气泡和滚动状态栏
     ESP_LOGI(TAG, "LcdDisplay::SetupUI: 天机·六爻周易推演主屏接管模式");
 }
-#endif
+
 void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
     DisplayLockGuard lock(this);
     if (preview_image_ == nullptr) {
