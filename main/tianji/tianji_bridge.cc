@@ -13,6 +13,7 @@
 #include "wifi_manager.h"
 
 #include <esp_log.h>
+#include <esp_mac.h>
 #include <string>
 #include <vector>
 #include <cstring>
