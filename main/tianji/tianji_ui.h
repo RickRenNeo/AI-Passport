@@ -3,6 +3,7 @@
 
 #include "lvgl.h"
 #include "tianji_logic.h"
+#include "tianji_net.h"
 #include <stdbool.h>
 
 #ifdef __cplusplus
