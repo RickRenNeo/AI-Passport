@@ -79,6 +79,12 @@ void tianji_voice_stop_recording(void);
 // 停止宗师语音播放（静音打断，用户按确定键或下键）
 void tianji_voice_stop_playing(void);
 
+// 结束整段语音会话（关闭小智音频通道，释放连接）
+void tianji_voice_end(void);
+
+// 获取本轮语音识别出的求测事项（可能为空）
+const char *tianji_voice_get_question(void);
+
 // 查询语音系统状态
 tianji_voice_state_t tianji_voice_get_state(void);
 bool tianji_voice_is_recording(void);

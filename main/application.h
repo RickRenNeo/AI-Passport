@@ -108,6 +108,13 @@ public:
      */
     void StopListening();
 
+    /**
+     * Close the current audio channel immediately.
+     * Used by application screens that own multi-turn voice sessions.
+     * Must be called from the main task (e.g. inside Schedule()).
+     */
+    void CloseAudioChannel();
+
     void Reboot();
     void WakeWordInvoke(const std::string& wake_word);
     bool UpgradeFirmware(const std::string& url, const std::string& version = "");

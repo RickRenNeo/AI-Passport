@@ -801,6 +801,13 @@ void Application::StartListening() { xEventGroupSetBits(event_group_, MAIN_EVENT
 
 void Application::StopListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING); }
 
+void Application::CloseAudioChannel() {
+    if (protocol_ && protocol_->IsAudioChannelOpened()) {
+        ESP_LOGI(TAG, "Closing audio channel on request");
+        protocol_->CloseAudioChannel();
+    }
+}
+
 void Application::HandleToggleChatEvent() {
     auto state = GetDeviceState();
 

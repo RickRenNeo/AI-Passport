@@ -42,6 +42,8 @@ static tianji_session_t s_session;
 static tianji_view_t s_current_view = TIANJI_VIEW_STANDBY;
 static lv_obj_t *s_screen = NULL;
 static lv_obj_t *s_ai_card = NULL;
+static lv_obj_t *s_ai_label = NULL;
+static lv_obj_t *s_footer_label = NULL;
 static lv_obj_t *s_lbl_bat = NULL;
 static lv_obj_t *s_lbl_net = NULL;
 static int s_battery_soc = -1;
@@ -151,6 +153,7 @@ static void build_footer(lv_obj_t *parent, const char *prompt) {
     lv_obj_set_style_text_color(lbl, lv_color_hex(COLOR_WHITE), 0);
     lv_label_set_text(lbl, prompt);
     lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -6);
+    s_footer_label = lbl;
 }
 
 // 绘制单根爻画
@@ -570,9 +573,14 @@ static void render_view_voice_listening(void) {
         lv_obj_set_style_text_color(desc, lv_color_hex(COLOR_WHITE), 0);
         lv_obj_set_width(desc, 192);
         lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
-        lv_label_set_text(desc,
-            "语音已上传。\n\n"
-            "正在结合卦象与您所测之事推演批断，请稍候……");
+        const char *question = tianji_voice_get_question();
+        if (question && question[0] != '\0') {
+            lv_label_set_text_fmt(desc, "所问：%s\n\n正在结合卦象推演批断，请稍候……", question);
+        } else {
+            lv_label_set_text(desc,
+                "语音已上传。\n\n"
+                "正在结合卦象与您所测之事推演批断，请稍候……");
+        }
         lv_obj_set_pos(desc, 0, 32);
 
         build_footer(s_screen, "正在解卦，请稍候");
@@ -698,6 +706,7 @@ static void render_view_ai(void) {
     lv_obj_set_scrollbar_mode(card, LV_SCROLLBAR_MODE_AUTO);
 
     lv_obj_t *content = lv_label_create(card);
+    s_ai_label = content;
     lv_obj_set_style_text_font(content, &tianji_font_16, 0);
     lv_obj_set_width(content, 196);
     lv_label_set_long_mode(content, LV_LABEL_LONG_WRAP);
@@ -712,38 +721,109 @@ static void render_view_ai(void) {
     if (res && strlen(res) > 0) {
         lv_label_set_text(content, res);
     } else {
-        lv_label_set_text(content, "暂未感应到断语，请按确定键返回重试。");
+        lv_label_set_text(content, "正在等候宗师开口……");
     }
 
     if (tianji_voice_is_playing()) {
-        build_footer(s_screen, "按确定键或下键静音阅读");
+        build_footer(s_screen, "按确定键静音，长按退出");
+        lv_obj_update_layout(card);
+        lv_obj_scroll_by_bounded(card, 0, -2000, LV_ANIM_OFF);
     } else {
-        build_footer(s_screen, "上下键滚动，确定键返回");
+        build_footer(s_screen, "确定键追问，长按返回");
+    }
+}
+
+static void update_ai_text_in_place(void) {
+    if (!s_ai_label || !lv_obj_is_valid(s_ai_label)) {
+        return;
+    }
+    const char *text = tianji_voice_get_text_reply();
+    if (!text || text[0] == '\0') {
+        text = "正在等候宗师开口……";
+    }
+    lv_label_set_text(s_ai_label, text);
+    if (s_ai_card && lv_obj_is_valid(s_ai_card)) {
+        lv_obj_update_layout(s_ai_card);
+        if (tianji_voice_is_playing()) {
+            lv_obj_scroll_by_bounded(s_ai_card, 0, -2000, LV_ANIM_OFF);
+        }
+    }
+    if (s_footer_label && lv_obj_is_valid(s_footer_label)) {
+        lv_label_set_text(s_footer_label,
+                          tianji_voice_is_playing() ? "按确定键静音，长按退出"
+                                                    : "确定键追问，长按返回");
     }
 }
 
 static void on_voice_status_update(tianji_voice_state_t state, const char *msg) {
     (void)msg;
-    if (bsp_lvgl_lock(100)) {
-        if (state == TIANJI_VOICE_STATE_RECORDING) {
-            // 当网络握手打通，正式进入录音状态时，播放短促清脆就绪提示音！
+    if (!bsp_lvgl_lock(200)) {
+        return;
+    }
+
+    switch (state) {
+        case TIANJI_VOICE_STATE_RECORDING:
+            // 通道真正就绪、开始上行录音时才提示“请说话”。
             tianji_audio_play(TIANJI_SFX_START);
-        } else if (state == TIANJI_VOICE_STATE_NEED_MORE) {
+            s_current_view = TIANJI_VIEW_VOICE_LISTENING;
+            refresh_view();
+            break;
+
+        case TIANJI_VOICE_STATE_UPLOADING:
+            if (s_current_view == TIANJI_VIEW_VOICE_LISTENING) {
+                // 已显示“正在解卦”，只需把刚识别出的事项补进页面。
+                refresh_view();
+            } else {
+                s_current_view = TIANJI_VIEW_VOICE_LISTENING;
+                refresh_view();
+            }
+            break;
+
+        case TIANJI_VOICE_STATE_PLAYING:
+            if (s_current_view != TIANJI_VIEW_AI) {
+                s_current_view = TIANJI_VIEW_AI;
+                refresh_view();
+            } else {
+                update_ai_text_in_place();
+            }
+            break;
+
+        case TIANJI_VOICE_STATE_SUCCESS:
+            if (s_current_view != TIANJI_VIEW_AI) {
+                s_current_view = TIANJI_VIEW_AI;
+                refresh_view();
+            } else {
+                update_ai_text_in_place();
+            }
+            break;
+
+        case TIANJI_VOICE_STATE_NEED_MORE:
             s_current_view = TIANJI_VIEW_VOICE_RETRY;
             tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
-        } else if (state == TIANJI_VOICE_STATE_SUCCESS) {
-            s_current_view = TIANJI_VIEW_AI;
-            tianji_audio_play(TIANJI_SFX_HEX_COMPLETE);
-        }
-        refresh_view();
-        bsp_lvgl_unlock();
+            refresh_view();
+            break;
+
+        case TIANJI_VOICE_STATE_ERROR:
+            s_current_view = TIANJI_VIEW_VOICE_LISTENING;
+            tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
+            refresh_view();
+            break;
+
+        default:
+            refresh_view();
+            break;
     }
+
+    bsp_lvgl_unlock();
 }
 
 static void refresh_view(void) {
     if (!s_screen) return;
     s_lbl_bat = NULL;
     s_lbl_net = NULL;
+    s_ai_card = NULL;
+    s_ai_label = NULL;
+    s_footer_label = NULL;
     lv_obj_clean(s_screen);
 
     switch (s_current_view) {
@@ -796,6 +876,8 @@ void tianji_ui_destroy(void) {
         lv_obj_clean(s_screen);
         s_screen = NULL;
         s_ai_card = NULL;
+        s_ai_label = NULL;
+        s_footer_label = NULL;
         s_lbl_bat = NULL;
         s_lbl_net = NULL;
     }
@@ -873,7 +955,6 @@ void tianji_ui_handle_key(tianji_key_action_t action) {
             }
             s_current_view = TIANJI_VIEW_VOICE_LISTENING;
             s_voice_listening_enter_us = esp_timer_get_time();
-            tianji_audio_play(TIANJI_SFX_START);
             refresh_view();
             tianji_voice_start(&s_session, on_voice_status_update);
         } else if (action == TIANJI_KEY_DOWN_CLICK) {
@@ -897,18 +978,24 @@ void tianji_ui_handle_key(tianji_key_action_t action) {
                 ESP_LOGI(TAG, "录音刚进入冷却保护期 (%lld ms < 1500ms)，屏蔽误触按键", (long long)elapsed_ms);
                 break;
             }
+            tianji_voice_state_t st = tianji_voice_get_state();
+            if (st == TIANJI_VOICE_STATE_CONNECTING) {
+                // 通道尚未就绪，此时提交会让桥接层停在“请稍候”。
+                ESP_LOGI(TAG, "语音通道仍在连接，本次按键不提交，等待就绪提示音");
+                break;
+            }
             if (tianji_voice_is_recording()) {
                 // 用户在说话后主动按确定键提前提交：播放完成音效并停止录音
                 tianji_audio_play(TIANJI_SFX_HEX_COMPLETE);
                 tianji_voice_stop_recording();
                 refresh_view();
-            } else if (tianji_voice_get_state() == TIANJI_VOICE_STATE_ERROR) {
+            } else if (st == TIANJI_VOICE_STATE_ERROR) {
                 s_current_view = TIANJI_VIEW_OVERVIEW;
                 tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
                 refresh_view();
             }
         } else if (action == TIANJI_KEY_OK_LONG) {
-            tianji_voice_stop_recording();
+            tianji_voice_end();
             s_current_view = TIANJI_VIEW_STANDBY;
             tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
             refresh_view();
@@ -920,7 +1007,6 @@ void tianji_ui_handle_key(tianji_key_action_t action) {
             tianji_voice_stop_playing();
             s_current_view = TIANJI_VIEW_VOICE_LISTENING;
             s_voice_listening_enter_us = esp_timer_get_time();
-            tianji_audio_play(TIANJI_SFX_START);
             refresh_view();
             tianji_voice_start(&s_session, on_voice_status_update);
         } else if (action == TIANJI_KEY_DOWN_CLICK) {
@@ -929,7 +1015,7 @@ void tianji_ui_handle_key(tianji_key_action_t action) {
             tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
             refresh_view();
         } else if (action == TIANJI_KEY_OK_LONG) {
-            tianji_voice_stop_playing();
+            tianji_voice_end();
             s_current_view = TIANJI_VIEW_STANDBY;
             tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
             refresh_view();
@@ -964,7 +1050,7 @@ void tianji_ui_handle_key(tianji_key_action_t action) {
         if (tianji_voice_is_playing()) {
             if (action == TIANJI_KEY_OK_CLICK || action == TIANJI_KEY_DOWN_CLICK) {
                 tianji_voice_stop_playing();
-                refresh_view();
+                update_ai_text_in_place();
                 return;
             }
         }
@@ -974,14 +1060,15 @@ void tianji_ui_handle_key(tianji_key_action_t action) {
         } else if (action == TIANJI_KEY_UP_CLICK) {
             if (s_ai_card) lv_obj_scroll_by_bounded(s_ai_card, 0, 40, LV_ANIM_ON);
         } else if (action == TIANJI_KEY_OK_CLICK) {
-            tianji_voice_stop_playing();
+            // 多轮追问：不清空小智会话，直接在同一通道再次开口。
+            s_current_view = TIANJI_VIEW_VOICE_LISTENING;
+            s_voice_listening_enter_us = esp_timer_get_time();
+            refresh_view();
+            tianji_voice_start(&s_session, on_voice_status_update);
+        } else if (action == TIANJI_KEY_OK_LONG) {
+            tianji_voice_end();
             s_current_view = TIANJI_VIEW_OVERVIEW;
             tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
-            refresh_view();
-        } else if (action == TIANJI_KEY_OK_LONG) {
-            tianji_voice_stop_playing();
-            s_current_view = TIANJI_VIEW_STANDBY;
-            tianji_audio_play(TIANJI_SFX_START);
             refresh_view();
         }
         break;

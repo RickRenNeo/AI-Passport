@@ -2,6 +2,7 @@
 #define LITE_AUDIO_ENGINE_H
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -61,8 +62,13 @@ private:
     std::function<void(bool)> vad_state_change_callback_;
     std::string empty_wake_word_;
 
+    bool vad_speaking_ = false;
+    int64_t vad_last_voice_us_ = 0;
+    int64_t vad_last_log_us_ = 0;
+
     bool CreateWakeWordLocked();
     void OutputRawAudio(const std::vector<int16_t>& data);
+    void UpdateVoiceActivity(const std::vector<int16_t>& data);
 };
 
 #endif
