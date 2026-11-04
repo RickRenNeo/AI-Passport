@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 #include <cstdarg>
+#include <cstdint>
 #include <cstring>
 #include <cstdio>
 #include <mutex>
@@ -62,17 +63,21 @@ enum class Phase {
 };
 
 constexpr int64_t kTickUs = 100 * 1000;             // 100 ms 看门狗
-constexpr int64_t kSilenceStopUs = 5 * 1000 * 1000; // 说话结束后静音 5 秒自动呈报
-constexpr int64_t kNoVoiceWaitUs = 9 * 1000 * 1000; // 一直没开口的等候上限（多轮自动聆听）
+constexpr int64_t kSilenceStopUs = 2 * 1000 * 1000; // 说话结束后静音 2 秒自动呈报（贴近小智原生 VAD）
+constexpr int64_t kNoVoiceWaitUs = 5 * 1000 * 1000; // 一直没开口：5 秒后自动收起麦克风，不提交空录音
 constexpr int64_t kMaxRecordUs = 20 * 1000 * 1000;  // 单轮录音硬上限
 constexpr int64_t kConnectTimeoutUs = 15 * 1000 * 1000;
 constexpr int64_t kAnswerTimeoutUs = 30 * 1000 * 1000;
-constexpr int64_t kFollowupDelayUs = 900 * 1000;    // 断语播毕后稍等再开麦
+constexpr int64_t kFollowupDelayUs = 300 * 1000;    // 断语播毕后稍等再开麦
 constexpr int64_t kFollowupDrainWaitUs = 8 * 1000 * 1000; // 等播放队列排空的兜底
+constexpr int64_t kVoiceRunTicksNeeded = 3;         // 连续 300 ms 人声才算真的开了口
 
 Phase s_phase = Phase::kIdle;
 int64_t s_phase_since_us = 0;
 int64_t s_last_voice_us = 0;
+int64_t s_submit_us = 0;
+int64_t s_last_tts_us = 0;
+uint32_t s_voice_run_ticks = 0;
 bool s_vad_active = false;
 esp_timer_handle_t s_watchdog = nullptr;
 
@@ -95,10 +100,12 @@ static tianji_voice_state_t PublicState(Phase phase) {
 }
 
 // 对话文本累积：解卦页只显示这一段，问与答按轮追加，超长时丢弃最早的一半。
+// MCP 工具调用在 MQTT 任务里读取同一段文本，必须与会话互斥锁共用。
 static void AppendTranscript(const char* text) {
     if (text == nullptr || text[0] == '\0') {
         return;
     }
+    std::lock_guard<std::mutex> lock(s_session_mutex);
     size_t used = strlen(s_transcript);
     const size_t need = strlen(text);
     if (used + need + 1 > sizeof(s_transcript)) {
@@ -154,6 +161,9 @@ static void ResetRoundState(void) {
     s_vad_active = false;
     s_round_voice_heard = false;
     s_round_answered = false;
+    s_voice_run_ticks = 0;
+    s_submit_us = 0;
+    s_last_tts_us = 0;
     s_last_voice_us = esp_timer_get_time();
 }
 
@@ -254,6 +264,7 @@ static void FinishListeningRound(bool user_pressed) {
         return;
     }
     ESP_LOGI(TAG, "%s提交本轮录音", user_pressed ? "用户按键，" : "静音超时，");
+    s_submit_us = esp_timer_get_time();
     app.StopListening();
     EnterPhase(Phase::kWaiting, "【宗师推演中...】");
 }
@@ -301,8 +312,16 @@ static void WatchdogTick(void* arg) {
                 ESP_LOGI(TAG, "VAD %s", voice ? "检测到人声" : "静音");
             }
             if (voice) {
+                if (s_voice_run_ticks < 1000) {
+                    ++s_voice_run_ticks;
+                }
+                // 单拍 100 ms 的按键/环境噪声不算"开口"，必须连续 300 ms 人声。
+                if (s_voice_run_ticks >= kVoiceRunTicksNeeded) {
+                    s_round_voice_heard = true;
+                }
                 s_last_voice_us = now;
-                s_round_voice_heard = true;
+            } else {
+                s_voice_run_ticks = 0;
             }
             const int64_t silent_ms = (now - s_last_voice_us) / 1000;
             if (phase_ms > kMaxRecordUs / 1000) {
@@ -312,7 +331,7 @@ static void WatchdogTick(void* arg) {
                 ESP_LOGI(TAG, "连续静音 %d ms，自动结束本轮录音", static_cast<int>(silent_ms));
                 FinishListeningRound(false);
             } else if (!s_round_voice_heard && phase_ms >= kNoVoiceWaitUs / 1000) {
-                ESP_LOGI(TAG, "等候 %d ms 未开口，自动收起麦克风", static_cast<int>(phase_ms));
+                ESP_LOGI(TAG, "等候 %d ms 未开口，自动收起麦克风（不提交）", static_cast<int>(phase_ms));
                 FinishListeningRound(false);
             }
             break;
@@ -320,7 +339,11 @@ static void WatchdogTick(void* arg) {
 
         case Phase::kWaiting:
             if (phase_ms > kAnswerTimeoutUs / 1000) {
-                FailRound("未收到宗师回应，请检查网络后重试。");
+                // 服务端没回应时不弹"请重试"的失败页：安静回到可继续追问，
+                // 用户按确定键即可再来一问（也避免整段会话被判为异常）。
+                ESP_LOGW(TAG, "宗师 %d ms 内未回应，回到可继续追问", static_cast<int>(phase_ms));
+                s_followup_pending = false;
+                EnterPhase(Phase::kIdle, "宗师未应，可再问");
             }
             break;
 
@@ -369,6 +392,25 @@ static std::string BuildHexagramContext() {
     if (s_user_question[0]) {
         append("求测者所问：%s\n", s_user_question);
     }
+
+    // 同一页内的追问可能发生在服务端重开会话之后（断线、超时都会让服务端失忆），
+    // 把本页此前的问答一起带回去，保证"不离开页面就一直有上下文"。
+    size_t used = strlen(s_transcript);
+    if (used > 0) {
+        size_t start = (used > 900) ? used - 900 : 0;
+        const char* cursor = s_transcript + start;
+        if (start > 0) {
+            const char* newline = strchr(cursor, '\n');
+            if (newline != nullptr) {
+                cursor = newline + 1;
+            }
+        }
+        text += "【本页此前的问答记录（同一场解卦，请接着上文讲）】\n";
+        text.append(cursor, strlen(cursor));
+        text += "\n";
+        append("若求测者本次是在追问、要求详解或复述上文，请直接接着解释，"
+               "不要重新自我介绍、不要说“第一次跟我说话”或重新开场。\n");
+    }
     append("本卦：第%u卦 %s（上%s%s，下%s%s）\n", static_cast<unsigned>(primary->index),
            primary->name, primary->upper_name,
            tianji_trigram_nature(static_cast<tianji_trigram_t>(
@@ -410,10 +452,11 @@ static std::string BuildHexagramContext() {
 static void RegisterHexagramTool() {
     McpServer::GetInstance().AddTool(
         "self.tianji.get_hexagram",
-        "获取本次六爻摇卦的真实结果（本卦、变卦、动爻、卦辞、象曰与三才断语）。"
-        "当用户询问占卜、解卦、问卦、求测事业/财运/姻缘/吉凶时，必须先调用本工具获取卦象，"
-        "再结合用户所问之事解卦。收到请求后请立即调用，调用前不要输出任何寒暄、过渡语、"
-        "百分号或工具名。严禁在未调用本工具时凭空编造卦象。",
+        "获取本次六爻摇卦的真实结果（本卦、变卦、动爻、卦辞、象曰与三才断语），"
+        "同时带回本页此前的问答记录。"
+        "当用户询问占卜、解卦、问卦、求测事业/财运/姻缘/吉凶，或要求详细解释、追问、复述上文时，"
+        "必须先调用本工具获取卦象与上文，再作答。收到请求后请立即调用，调用前不要输出任何寒暄、"
+        "过渡语、百分号或工具名。严禁在未调用本工具时凭空编造卦象或复述上文。",
         PropertyList(), [](const PropertyList&) -> ToolResult {
             std::string context = BuildHexagramContext();
             ESP_LOGI(TAG, "服务端 LLM 调取卦象上下文 (%u 字节)", (unsigned)context.size());
@@ -552,11 +595,20 @@ void tianji_bridge_on_tts_sentence(const char *text) {
         ESP_LOGW(TAG, "忽略工具调用残留句子: %s", text);
         return;
     }
+    const int64_t now = esp_timer_get_time();
+    if (!s_round_answered) {
+        if (s_submit_us != 0) {
+            ESP_LOGI(TAG, "首句断语送达 %d ms（自提交起）", static_cast<int>((now - s_submit_us) / 1000));
+        }
+    } else if (s_last_tts_us != 0) {
+        ESP_LOGI(TAG, "断语句间隔 %d ms", static_cast<int>((now - s_last_tts_us) / 1000));
+    }
+    s_last_tts_us = now;
     s_round_answered = true;
     AppendTranscript(text);
     s_phase = Phase::kSpeaking;
     s_voice_state = TIANJI_VOICE_STATE_PLAYING;
-    s_phase_since_us = esp_timer_get_time();
+    s_phase_since_us = now;
     NotifyUi(TIANJI_VOICE_STATE_PLAYING, s_transcript);
 }
 
