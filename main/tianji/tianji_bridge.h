@@ -15,8 +15,8 @@ void tianji_bridge_init(void);
 // 按键输入事件分发到六爻状态机
 void tianji_bridge_handle_key(tianji_key_action_t action);
 
-// 电池电量更新
-void tianji_bridge_update_battery(int soc);
+// 电池电量与充电状态更新
+void tianji_bridge_update_battery(int soc, bool charging);
 
 // 网络状态更新
 void tianji_bridge_set_net_state(tianji_net_state_t state);

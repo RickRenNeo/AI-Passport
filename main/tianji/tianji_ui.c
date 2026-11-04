@@ -47,6 +47,12 @@ static lv_obj_t *s_footer_label = NULL;
 static lv_obj_t *s_lbl_bat = NULL;
 static lv_obj_t *s_lbl_net = NULL;
 static lv_obj_t *s_lbl_volume = NULL;
+static lv_obj_t *s_toast = NULL;
+static bool s_charging = false;
+static bool s_low_battery_reported = false;
+static bool s_pulse_on = false;
+// 解卦页展示用文本（在原文基础上插入 LVGL 变色标记，问句灰、宗师白）。
+static char s_ai_display[5120];
 static int s_battery_soc = -1;
 static uint8_t s_reading_page = 0; // 0: 卦辞象曰, 1: 事业求财, 2: 姻缘变局
 static int64_t s_ai_enter_us = 0; // 进入解卦页的绝对时间戳，用于按键防抖冷却
@@ -59,7 +65,12 @@ static void update_net_label(lv_obj_t *lbl_net) {
     if (tianji_net_is_enabled()) {
         if (s_current_view == TIANJI_VIEW_AI) {
             tianji_voice_state_t vs = tianji_voice_get_state();
-            if (vs == TIANJI_VOICE_STATE_RECORDING || vs == TIANJI_VOICE_STATE_CONNECTING) {
+            if (vs == TIANJI_VOICE_STATE_RECORDING) {
+                // 录音时"倾听"徽标在青/灰之间呼吸，明确告诉用户麦克风已开。
+                lv_obj_set_style_text_color(
+                    lbl_net, lv_color_hex(s_pulse_on ? COLOR_CYAN : COLOR_GRAY), 0);
+                lv_label_set_text(lbl_net, "倾听");
+            } else if (vs == TIANJI_VOICE_STATE_CONNECTING) {
                 lv_obj_set_style_text_color(lbl_net, lv_color_hex(COLOR_CYAN), 0);
                 lv_label_set_text(lbl_net, "倾听");
             } else if (vs == TIANJI_VOICE_STATE_PLAYING) {
@@ -161,8 +172,121 @@ static void build_footer(lv_obj_t *parent, const char *prompt) {
     s_footer_label = lbl;
 }
 
+// 5 秒后自动销毁的浮层提示（低电量等一次性提醒）。
+static void toast_timer_cb(lv_timer_t *timer) {
+    lv_obj_t *obj = (lv_obj_t *)lv_timer_get_user_data(timer);
+    if (obj != NULL && lv_obj_is_valid(obj)) {
+        lv_obj_del(obj);
+    }
+    if (obj == s_toast) {
+        s_toast = NULL;
+    }
+    lv_timer_delete(timer);
+}
+
+static void show_toast(const char *text) {
+    if (!s_screen) {
+        return;
+    }
+    if (s_toast != NULL && lv_obj_is_valid(s_toast)) {
+        lv_obj_del(s_toast);
+    }
+    lv_obj_t *box = lv_obj_create(s_screen);
+    s_toast = box;
+    lv_obj_set_size(box, 190, 30);
+    lv_obj_align(box, LV_ALIGN_BOTTOM_MID, 0, -34);
+    lv_obj_set_style_bg_color(box, lv_color_hex(COLOR_PANEL), 0);
+    lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(COLOR_AMBER), 0);
+    lv_obj_set_style_border_width(box, 1, 0);
+    lv_obj_set_style_radius(box, 4, 0);
+    lv_obj_set_style_pad_all(box, 0, 0);
+
+    lv_obj_t *lbl = lv_label_create(box);
+    lv_obj_set_style_text_font(lbl, &tianji_font_16, 0);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(COLOR_AMBER), 0);
+    lv_label_set_text(lbl, text);
+    lv_obj_center(lbl);
+
+    lv_timer_t *timer = lv_timer_create(toast_timer_cb, 2500, box);
+    lv_timer_set_repeat_count(timer, 1);
+}
+
+// 按 UTF-8 字符数截断（避免总览摘要超出卡片），超长时补省略号。
+static void clip_text(char *dst, size_t cap, const char *src, size_t max_chars) {
+    size_t i = 0;
+    size_t chars = 0;
+    while (src[i] != '\0' && chars < max_chars) {
+        size_t step = 1;
+        const unsigned char c = (unsigned char)src[i];
+        if (c >= 0xF0) {
+            step = 4;
+        } else if (c >= 0xE0) {
+            step = 3;
+        } else if (c >= 0xC0) {
+            step = 2;
+        }
+        if (i + step >= cap) {
+            break;
+        }
+        i += step;
+        ++chars;
+    }
+    if (i >= cap) {
+        i = cap - 1;
+    }
+    memcpy(dst, src, i);
+    dst[i] = '\0';
+    if (src[i] != '\0' && i + 3 < cap) {
+        memcpy(dst + i, "…", 4);  // UTF-8 省略号 3 字节 + 终止符
+    }
+}
+
+// 把桥接层的纯文本转成带变色标记的展示文本：问句灰、宗师断语白。
+static const char *build_ai_display(void) {
+    const char *src = tianji_voice_get_text_reply();
+    if (src == NULL || src[0] == '\0') {
+        return "宗师正在接通……";
+    }
+
+    size_t used = 0;
+    s_ai_display[0] = '\0';
+    const char *p = src;
+    while (*p != '\0' && used + 32 < sizeof(s_ai_display)) {
+        const char *line_end = strchr(p, '\n');
+        const size_t line_len = line_end ? (size_t)(line_end - p) : strlen(p);
+        const char *marker = NULL;
+        if (line_len >= 6 && strncmp(p, "问：", 6) == 0) {
+            marker = "#8492A6 ";
+        } else if (line_len >= 6 && strncmp(p, "答：", 6) == 0) {
+            marker = "#F8FAFC ";
+        }
+        if (marker != NULL) {
+            size_t m = strlen(marker);
+            memcpy(s_ai_display + used, marker, m);
+            used += m;
+        }
+        for (size_t i = 0; i < line_len && used + 4 < sizeof(s_ai_display); ++i) {
+            // '#' 是变色控制符，正文里出现会破坏渲染，展示时替换为空格。
+            s_ai_display[used++] = (p[i] == '#') ? ' ' : p[i];
+        }
+        if (marker != NULL) {
+            s_ai_display[used++] = '#';
+        }
+        if (line_end != NULL) {
+            s_ai_display[used++] = '\n';
+            p = line_end + 1;
+        } else {
+            break;
+        }
+    }
+    s_ai_display[used] = '\0';
+    return s_ai_display;
+}
+
 // 绘制单根爻画
-static void draw_yao_bar(lv_obj_t *parent, int x, int y, int total_w, int h, bool is_yang, uint32_t color_hex) {
+static void draw_yao_bar(lv_obj_t *parent, int x, int y, int total_w, int h, bool is_yang,
+                         uint32_t color_hex) {
     if (is_yang) {
         lv_obj_t *bar = lv_obj_create(parent);
         lv_obj_set_size(bar, total_w, h);
@@ -212,7 +336,7 @@ static void render_view_standby(void) {
     lv_obj_t *title = lv_label_create(card);
     lv_obj_set_style_text_font(title, &tianji_font_16, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(COLOR_CYAN), 0);
-    lv_label_set_text(title, "天机 · 六爻");
+    lv_label_set_text(title, "六十四卦 · 铜钱起卦");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 16);
 
     // 心法提示
@@ -260,16 +384,19 @@ static void render_view_standby(void) {
     lv_obj_set_style_text_align(mode_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_line_space(mode_lbl, 6, 0);
     if (tianji_net_is_config_mode()) {
-        lv_label_set_text_fmt(mode_lbl, "配网模式: 请连接热点\nXiaozhi-%s\n访问 192.168.4.1", tianji_get_ap_suffix());
-    } else if (tianji_net_is_enabled()) {
-        lv_label_set_text(mode_lbl, "起卦法则：三钱古法\n运行模式：联机模式");
+        lv_label_set_text_fmt(mode_lbl, "配网中：连接热点\nXiaozhi-%s\n打开 192.168.4.1", tianji_get_ap_suffix());
+    } else if (s_battery_soc >= 0 && s_battery_soc <= 10) {
+        lv_label_set_text_fmt(mode_lbl, "起卦方式：三枚铜钱\n运行模式：%s\n电量低，请充电",
+                              tianji_net_is_enabled() ? "联机" : "脱机");
     } else {
-        lv_label_set_text(mode_lbl, "起卦法则：三钱古法\n运行模式：脱机模式");
+        lv_label_set_text_fmt(mode_lbl, "起卦方式：三枚铜钱\n运行模式：%s",
+                              tianji_net_is_enabled() ? "联机" : "脱机");
     }
     lv_obj_align(mode_lbl, LV_ALIGN_TOP_MID, 0, 166);
 
     // 音量指示：首页上下键可直接调节，这里常驻显示当前音量。
-    if (!tianji_net_is_config_mode()) {
+    // 配网页或低电提示占满三行时让位，避免文字重叠。
+    if (!tianji_net_is_config_mode() && !(s_battery_soc >= 0 && s_battery_soc <= 10)) {
         lv_obj_t *vol_lbl = lv_label_create(card);
         s_lbl_volume = vol_lbl;
         lv_obj_set_style_text_font(vol_lbl, &tianji_font_16, 0);
@@ -284,14 +411,20 @@ static void render_view_standby(void) {
         lv_obj_align(vol_lbl, LV_ALIGN_TOP_MID, 0, 208);
     }
 
-    build_footer(s_screen, "短按确定起卦  长按2秒切换模式");
+    build_footer(s_screen, "确定起卦  长按切联机");
 }
 
 // ============================================================================
 // 界面 2: 逐次起卦推演页（与上一版本完全一致）
 // ============================================================================
 static void render_view_casting(void) {
-    build_header(s_screen, "起卦推演");
+    char hbuf[32];
+    if (s_session.current_line >= 6) {
+        snprintf(hbuf, sizeof(hbuf), "六爻已成");
+    } else {
+        snprintf(hbuf, sizeof(hbuf), "起卦 第%d/6爻", (int)s_session.current_line + 1);
+    }
+    build_header(s_screen, hbuf);
 
     // 顶部当前投掷铜钱图像与性质展示卡片
     lv_obj_t *coin_bar = lv_obj_create(s_screen);
@@ -441,23 +574,30 @@ static void render_view_overview(void) {
     lv_label_set_text_fmt(lbl_prim_sub, "%s上%s下", prim->upper_name, prim->lower_name);
     lv_obj_set_pos(lbl_prim_sub, 16, 46);
 
-    // 右栏: 变卦
+    // 右栏: 变卦（六爻皆静时没有变卦，绝不能把本卦再标成"变卦"）
+    const bool has_change = s_session.moving_count > 0;
     lv_obj_t *lbl_trans_badge = lv_label_create(card);
     lv_obj_set_style_text_font(lbl_trans_badge, &tianji_font_16, 0);
-    lv_obj_set_style_text_color(lbl_trans_badge, lv_color_hex(COLOR_AMBER), 0);
-    lv_label_set_text(lbl_trans_badge, "变卦");
+    lv_obj_set_style_text_color(lbl_trans_badge,
+                                lv_color_hex(has_change ? COLOR_AMBER : COLOR_GRAY), 0);
+    lv_label_set_text(lbl_trans_badge, has_change ? "变卦" : "无变卦");
     lv_obj_set_pos(lbl_trans_badge, 120, 6);
 
     lv_obj_t *lbl_trans_title = lv_label_create(card);
     lv_obj_set_style_text_font(lbl_trans_title, &tianji_font_16, 0);
-    lv_obj_set_style_text_color(lbl_trans_title, lv_color_hex(COLOR_WHITE), 0);
-    lv_label_set_text(lbl_trans_title, trans->name);
+    lv_obj_set_style_text_color(lbl_trans_title,
+                                lv_color_hex(has_change ? COLOR_WHITE : COLOR_GRAY), 0);
+    lv_label_set_text(lbl_trans_title, has_change ? trans->name : "六爻皆静");
     lv_obj_set_pos(lbl_trans_title, 120, 26);
 
     lv_obj_t *lbl_trans_sub = lv_label_create(card);
     lv_obj_set_style_text_font(lbl_trans_sub, &tianji_font_16, 0);
     lv_obj_set_style_text_color(lbl_trans_sub, lv_color_hex(COLOR_GRAY), 0);
-    lv_label_set_text_fmt(lbl_trans_sub, "%s上%s下", trans->upper_name, trans->lower_name);
+    if (has_change) {
+        lv_label_set_text_fmt(lbl_trans_sub, "%s上%s下", trans->upper_name, trans->lower_name);
+    } else {
+        lv_label_set_text(lbl_trans_sub, "以本卦断之");
+    }
     lv_obj_set_pos(lbl_trans_sub, 120, 46);
 
     // 并列绘制六爻
@@ -470,7 +610,9 @@ static void render_view_overview(void) {
         bool t_yang = tianji_line_transformed_is_yang(s_session.lines[i]);
 
         draw_yao_bar(card, 16, cur_y, 80, 6, p_yang, moving ? COLOR_AMBER : COLOR_CYAN);
-        draw_yao_bar(card, 120, cur_y, 80, 6, t_yang, moving ? COLOR_AMBER : COLOR_GRAY);
+        if (has_change) {
+            draw_yao_bar(card, 120, cur_y, 80, 6, t_yang, moving ? COLOR_AMBER : COLOR_GRAY);
+        }
     }
 
     // 分割线
@@ -488,11 +630,17 @@ static void render_view_overview(void) {
     lv_label_set_long_mode(lbl_summary, LV_LABEL_LONG_WRAP);
     lv_obj_set_pos(lbl_summary, 12, 174);
 
-    if (s_session.moving_count == 0) {
-        lv_label_set_text_fmt(lbl_summary, "六爻皆静：以本卦卦辞为主\n%s", prim->judgment);
-    } else {
-        lv_label_set_text_fmt(lbl_summary, "%s之%s，%d位动爻变化\n走向：%s",
-            prim->short_name, trans->short_name, s_session.moving_count, trans->xiang);
+    {
+        char clipped[128];
+        if (s_session.moving_count == 0) {
+            clip_text(clipped, sizeof(clipped), prim->judgment, 22);
+            lv_label_set_text_fmt(lbl_summary, "六爻皆静，以本卦卦辞断\n%s", clipped);
+        } else {
+            clip_text(clipped, sizeof(clipped), trans->xiang, 22);
+            lv_label_set_text_fmt(lbl_summary, "%s之%s，%d爻动\n变局：%s",
+                prim->short_name, trans->short_name,
+                (int)s_session.moving_count, clipped);
+        }
     }
 
     if (tianji_net_is_enabled()) {
@@ -519,7 +667,7 @@ static void render_view_reading(void) {
     lv_obj_set_style_border_color(card, lv_color_hex(COLOR_BORDER), 0);
     lv_obj_set_style_border_width(card, 1, 0);
     lv_obj_set_style_pad_all(card, 0, 0);
-    lv_obj_set_scrollbar_mode(card, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_scrollbar_mode(card, LV_SCROLLBAR_MODE_AUTO);
 
     lv_obj_t *content = lv_label_create(card);
     lv_obj_set_style_text_font(content, &tianji_font_16, 0);
@@ -543,27 +691,30 @@ static void render_view_reading(void) {
             prim->relationship, trans->pinyin_name, trans->judgment);
     }
 
-    build_footer(s_screen, "上下键翻页，确定键返回");
+    build_footer(s_screen, "上下翻页  确定返回");
 }
 
 // ============================================================================
 // 界面 5: 天机解卦页（无键多轮语音问答 + 断语文字同步上屏）
 // ============================================================================
 static const char *voice_footer_prompt(void) {
+    if (!tianji_net_is_connected()) {
+        return "网络未连接，请检查 Wi-Fi";
+    }
     switch (tianji_voice_get_state()) {
     case TIANJI_VOICE_STATE_CONNECTING:
         return "宗师接通中，请稍候";
     case TIANJI_VOICE_STATE_RECORDING:
-        return "● 静听中，说完自动呈报";
+        return "静听中……说完自动解卦";
     case TIANJI_VOICE_STATE_UPLOADING:
-        return "宗师推演中…";
+        return "宗师推演中……";
     case TIANJI_VOICE_STATE_PLAYING:
         return tianji_voice_is_waiting_sentence() ? "宗师思索中，请稍候"
-                                                  : "诵读中，确定键打断追问";
+                                                  : "诵读中  确定键打断";
     case TIANJI_VOICE_STATE_ERROR:
-        return "按确定键重试，长按退出";
+        return "确定键重试  长按重起";
     default:
-        return "确定键继续问，长按退出";
+        return "上下翻阅 确定追问 长按重起";
     }
 }
 
@@ -593,14 +744,10 @@ static void render_view_ai(void) {
     lv_obj_set_style_text_color(content, lv_color_hex(COLOR_WHITE), 0);
     lv_obj_set_width(content, 196);
     lv_label_set_long_mode(content, LV_LABEL_LONG_WRAP);
+    lv_label_set_recolor(content, true);
     lv_obj_set_pos(content, 0, 0);
 
-    const char *text = tianji_voice_get_text_reply();
-    if (text && text[0] != '\0') {
-        lv_label_set_text(content, text);
-    } else {
-        lv_label_set_text(content, "宗师正在接通……");
-    }
+    lv_label_set_text(content, build_ai_display());
 
     build_footer(s_screen, voice_footer_prompt());
     scroll_ai_to_bottom();
@@ -610,12 +757,15 @@ static void update_ai_text_in_place(void) {
     if (!s_ai_label || !lv_obj_is_valid(s_ai_label)) {
         return;
     }
-    const char *text = tianji_voice_get_text_reply();
-    if (!text || text[0] == '\0') {
-        text = "宗师正在接通……";
+    // 只有用户本来就在底部时才自动跟随，往上回看时不会被新句子拽回去。
+    bool at_bottom = true;
+    if (s_ai_card && lv_obj_is_valid(s_ai_card)) {
+        at_bottom = lv_obj_get_scroll_bottom(s_ai_card) <= 2;
     }
-    lv_label_set_text(s_ai_label, text);
-    scroll_ai_to_bottom();
+    lv_label_set_text(s_ai_label, build_ai_display());
+    if (at_bottom) {
+        scroll_ai_to_bottom();
+    }
     if (s_footer_label && lv_obj_is_valid(s_footer_label)) {
         lv_label_set_text(s_footer_label, voice_footer_prompt());
     }
@@ -632,7 +782,17 @@ static void on_voice_status_update(tianji_voice_state_t state, const char *msg) 
 
     if (s_current_view != TIANJI_VIEW_AI) {
         s_current_view = TIANJI_VIEW_AI;
+        s_pulse_on = true;
         refresh_view();
+    } else if (state == TIANJI_VOICE_STATE_RECORDING) {
+        // 录音心跳：只让顶部"倾听"徽标呼吸并刷新底部状态，不重排整段断语。
+        s_pulse_on = !s_pulse_on;
+        if (s_lbl_net && lv_obj_is_valid(s_lbl_net)) {
+            update_net_label(s_lbl_net);
+        }
+        if (s_footer_label && lv_obj_is_valid(s_footer_label)) {
+            lv_label_set_text(s_footer_label, voice_footer_prompt());
+        }
     } else {
         if (state == TIANJI_VOICE_STATE_ERROR) {
             tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
@@ -650,6 +810,7 @@ static void refresh_view(void) {
     s_lbl_bat = NULL;
     s_lbl_net = NULL;
     s_lbl_volume = NULL;
+    s_toast = NULL;
     s_ai_card = NULL;
     s_ai_label = NULL;
     s_footer_label = NULL;
@@ -701,20 +862,41 @@ void tianji_ui_destroy(void) {
         s_ai_card = NULL;
         s_ai_label = NULL;
         s_footer_label = NULL;
+        s_toast = NULL;
         s_lbl_bat = NULL;
         s_lbl_net = NULL;
     }
 }
 
-void tianji_ui_update_battery(int soc) {
-    if (s_battery_soc == soc) return;
+void tianji_ui_update_battery(int soc, bool charging) {
+    const bool was_low = s_battery_soc >= 0 && s_battery_soc <= 10;
+    if (s_battery_soc == soc && s_charging == charging) {
+        return;
+    }
     s_battery_soc = soc;
+    s_charging = charging;
+
     if (s_lbl_bat && lv_obj_is_valid(s_lbl_bat)) {
-        if (s_battery_soc >= 0) {
-            lv_label_set_text_fmt(s_lbl_bat, "%d%%", s_battery_soc);
+        lv_obj_set_style_text_color(
+            s_lbl_bat, lv_color_hex((soc >= 0 && soc <= 10) ? COLOR_AMBER : COLOR_GRAY), 0);
+        if (soc >= 0) {
+            lv_label_set_text_fmt(s_lbl_bat, charging ? "+%d%%" : "%d%%", soc);
         } else {
             lv_label_set_text(s_lbl_bat, "--%");
         }
+    }
+
+    // 首页的三行模式说明会多出一行"电量低"，需要重绘让音量行让位。
+    if (s_current_view == TIANJI_VIEW_STANDBY && (soc <= 10) != was_low) {
+        refresh_view();
+    }
+
+    if (s_battery_soc >= 0 && s_battery_soc <= 10 && !s_low_battery_reported) {
+        s_low_battery_reported = true;
+        show_toast("电量低，请充电");
+        tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
+    } else if (s_battery_soc > 15) {
+        s_low_battery_reported = false;
     }
 }
 
@@ -835,8 +1017,9 @@ void tianji_ui_handle_key(tianji_key_action_t action) {
         tianji_voice_state_t st = tianji_voice_get_state();
 
         if (action == TIANJI_KEY_OK_LONG) {
+            // 长按直接回到起卦首页，重新起卦只需再按一次确定（原来要连按三次长按）。
             tianji_voice_end();
-            s_current_view = TIANJI_VIEW_OVERVIEW;
+            s_current_view = TIANJI_VIEW_STANDBY;
             tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
             refresh_view();
             break;

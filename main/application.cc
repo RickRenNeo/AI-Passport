@@ -276,7 +276,7 @@ void Application::Run() {
             int soc = 0;
             bool chg = false, dchg = false;
             if (Board::GetInstance().GetBatteryLevel(soc, chg, dchg) && soc >= 0) {
-                tianji_bridge_update_battery(soc);
+                tianji_bridge_update_battery(soc, chg);
             }
 
             // Print debug info every 10 seconds

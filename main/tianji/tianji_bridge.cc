@@ -79,6 +79,7 @@ int64_t s_last_voice_us = 0;
 int64_t s_submit_us = 0;
 int64_t s_last_tts_us = 0;
 int64_t s_record_start_us = 0;
+int64_t s_last_pulse_us = 0;
 uint32_t s_voice_run_ticks = 0;
 bool s_gap_announced = false;
 bool s_vad_active = false;
@@ -167,11 +168,13 @@ static void ResetRoundState(void) {
     s_voice_run_ticks = 0;
     s_submit_us = 0;
     s_last_tts_us = 0;
+    s_last_pulse_us = 0;
     s_gap_announced = false;
     s_last_voice_us = esp_timer_get_time();
 }
 
 static void BeginListeningRound(bool fresh);
+static void FailRound(const char* message);
 
 // 断语播完后等播放队列排空，再自动开麦，用户无需按任何键即可追问。
 static void MaybeStartFollowUp(void) {
@@ -228,11 +231,15 @@ static void BeginListeningRound(bool fresh) {
         s_session_active = true;
     }
     ResetRoundState();
+    if (!WifiManager::GetInstance().IsConnected()) {
+        FailRound("网络未连接，请检查 Wi-Fi 后重试");
+        return;
+    }
     if (s_phase == Phase::kSpeaking) {
         // 上一轮还在播报：先打断，再复用同一条会话追问。
         app.AbortSpeaking(kAbortReasonNone);
     }
-    EnterPhase(Phase::kConnecting, "【正在连通天机算力...】");
+    EnterPhase(Phase::kConnecting, "【正在连通天机算力……】");
     // manual 模式，由本地静音计时决定何时 stop
     app.StartListening();
 }
@@ -270,7 +277,7 @@ static void FinishListeningRound(bool user_pressed) {
     ESP_LOGI(TAG, "%s提交本轮录音", user_pressed ? "用户按键，" : "静音超时，");
     s_submit_us = esp_timer_get_time();
     app.StopListening();
-    EnterPhase(Phase::kWaiting, "【宗师推演中...】");
+    EnterPhase(Phase::kWaiting, "【宗师推演中……】");
 }
 
 static void WatchdogTick(void* arg) {
@@ -298,7 +305,7 @@ static void WatchdogTick(void* arg) {
                 s_last_voice_us = now;
                 // 开麦瞬间的自噪声（提示音尾音、I2S 启动瞬态）不算人声。
                 s_record_start_us = now;
-                EnterPhase(Phase::kRecording, "【请对准设备陈述所测之事...】");
+                EnterPhase(Phase::kRecording, "【请对准设备陈述所测之事……】");
             } else if (device_state == kDeviceStateIdle && phase_ms > 2000) {
                 FailRound("无法连接小智语音服务，请检查网络后重试。");
             } else if (phase_ms > kConnectTimeoutUs / 1000) {
@@ -340,6 +347,11 @@ static void WatchdogTick(void* arg) {
             } else if (!s_round_voice_heard && phase_ms >= kNoVoiceWaitUs / 1000) {
                 ESP_LOGI(TAG, "等候 %d ms 未开口，自动收起麦克风（不提交）", static_cast<int>(phase_ms));
                 FinishListeningRound(false);
+            }
+            // 录音期间每 500 ms 让界面顶部的"倾听"徽标呼吸一次，明确告诉用户麦克风是开的。
+            if (now - s_last_pulse_us >= 500 * 1000) {
+                s_last_pulse_us = now;
+                NotifyUi(TIANJI_VOICE_STATE_RECORDING, "pulse");
             }
             break;
         }
@@ -554,7 +566,7 @@ void tianji_bridge_init(void) {
         int soc = 0;
         bool chg = false, dchg = false;
         if (Board::GetInstance().GetBatteryLevel(soc, chg, dchg) && soc >= 0) {
-            tianji_ui_update_battery(soc);
+            tianji_ui_update_battery(soc, chg);
         }
         bsp_lvgl_unlock();
     }
@@ -567,9 +579,9 @@ void tianji_bridge_handle_key(tianji_key_action_t action) {
     }
 }
 
-void tianji_bridge_update_battery(int soc) {
+void tianji_bridge_update_battery(int soc, bool charging) {
     if (bsp_lvgl_lock(100)) {
-        tianji_ui_update_battery(soc);
+        tianji_ui_update_battery(soc, charging);
         bsp_lvgl_unlock();
     }
 }
@@ -616,7 +628,7 @@ void tianji_bridge_on_tts_start(void) {
     if (s_phase == Phase::kIdle || s_phase == Phase::kError) {
         return;
     }
-    EnterPhase(Phase::kSpeaking, "【宗师诵读中...】");
+    EnterPhase(Phase::kSpeaking, "【宗师诵读中……】");
 }
 
 void tianji_bridge_on_tts_sentence(const char *text) {
