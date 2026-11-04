@@ -46,6 +46,7 @@ static lv_obj_t *s_ai_label = NULL;
 static lv_obj_t *s_footer_label = NULL;
 static lv_obj_t *s_lbl_bat = NULL;
 static lv_obj_t *s_lbl_net = NULL;
+static lv_obj_t *s_lbl_volume = NULL;
 static int s_battery_soc = -1;
 static uint8_t s_reading_page = 0; // 0: 卦辞象曰, 1: 事业求财, 2: 姻缘变局
 static int64_t s_ai_enter_us = 0; // 进入解卦页的绝对时间戳，用于按键防抖冷却
@@ -266,6 +267,22 @@ static void render_view_standby(void) {
         lv_label_set_text(mode_lbl, "起卦法则：三钱古法\n运行模式：脱机模式");
     }
     lv_obj_align(mode_lbl, LV_ALIGN_TOP_MID, 0, 166);
+
+    // 音量指示：首页上下键可直接调节，这里常驻显示当前音量。
+    if (!tianji_net_is_config_mode()) {
+        lv_obj_t *vol_lbl = lv_label_create(card);
+        s_lbl_volume = vol_lbl;
+        lv_obj_set_style_text_font(vol_lbl, &tianji_font_16, 0);
+        lv_obj_set_style_text_color(vol_lbl, lv_color_hex(COLOR_CYAN), 0);
+        lv_obj_set_style_text_align(vol_lbl, LV_TEXT_ALIGN_CENTER, 0);
+        int volume = tianji_volume_get();
+        if (volume >= 0) {
+            lv_label_set_text_fmt(vol_lbl, "音量 %d%%｜上下键调节", volume);
+        } else {
+            lv_label_set_text(vol_lbl, "音量 --%｜上下键调节");
+        }
+        lv_obj_align(vol_lbl, LV_ALIGN_TOP_MID, 0, 208);
+    }
 
     build_footer(s_screen, "短按确定起卦  长按2秒切换模式");
 }
@@ -632,6 +649,7 @@ static void refresh_view(void) {
     if (!s_screen) return;
     s_lbl_bat = NULL;
     s_lbl_net = NULL;
+    s_lbl_volume = NULL;
     s_ai_card = NULL;
     s_ai_label = NULL;
     s_footer_label = NULL;
@@ -713,6 +731,17 @@ tianji_view_t tianji_ui_get_current_view(void) {
     return s_current_view;
 }
 
+static void adjust_volume(int delta) {
+    int volume = tianji_volume_step(delta);
+    if (volume < 0) {
+        return;
+    }
+    if (s_lbl_volume && lv_obj_is_valid(s_lbl_volume)) {
+        lv_label_set_text_fmt(s_lbl_volume, "音量 %d%%｜上下键调节", volume);
+    }
+    tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
+}
+
 void tianji_ui_handle_key(tianji_key_action_t action) {
     switch (s_current_view) {
     case TIANJI_VIEW_STANDBY:
@@ -721,6 +750,10 @@ void tianji_ui_handle_key(tianji_key_action_t action) {
             s_current_view = TIANJI_VIEW_CASTING;
             tianji_audio_play(TIANJI_SFX_START);
             refresh_view();
+        } else if (action == TIANJI_KEY_UP_CLICK) {
+            adjust_volume(10);
+        } else if (action == TIANJI_KEY_DOWN_CLICK) {
+            adjust_volume(-10);
         } else if (action == TIANJI_KEY_OK_LONG) {
             bool new_mode = !tianji_net_is_enabled();
             tianji_net_set_enabled(new_mode);

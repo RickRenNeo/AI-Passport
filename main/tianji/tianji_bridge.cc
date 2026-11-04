@@ -504,6 +504,22 @@ extern "C" esp_err_t bsp_audio_set_volume(uint8_t volume) {
     return ESP_OK;
 }
 
+extern "C" int tianji_volume_get(void) {
+    auto codec = Board::GetInstance().GetAudioCodec();
+    return codec ? codec->output_volume() : -1;
+}
+
+extern "C" int tianji_volume_step(int delta) {
+    auto codec = Board::GetInstance().GetAudioCodec();
+    if (!codec) return -1;
+    int volume = codec->output_volume() + delta;
+    if (volume < 0) volume = 0;
+    if (volume > 100) volume = 100;
+    codec->SetOutputVolume(volume);
+    ESP_LOGI(TAG, "音量调到 %d%%", volume);
+    return volume;
+}
+
 // ============================================================================
 // tianji_bridge 核心接口
 // ============================================================================

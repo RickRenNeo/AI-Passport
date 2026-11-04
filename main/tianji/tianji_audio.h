@@ -19,6 +19,12 @@ void tianji_audio_init(void);
 // 播放指定音效（非阻塞，通过消息队列派发）
 void tianji_audio_play(tianji_sfx_t sfx);
 
+// 读取喇叭当前音量（0..100，失败返回 -1）
+int tianji_volume_get(void);
+
+// 按 delta 百分比调节喇叭音量，返回调节后的音量（0..100，失败返回 -1）
+int tianji_volume_step(int delta);
+
 #ifdef __cplusplus
 }
 #endif
