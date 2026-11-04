@@ -61,7 +61,7 @@ static void update_net_label(lv_obj_t *lbl_net) {
             tianji_voice_state_t vs = tianji_voice_get_state();
             if (vs == TIANJI_VOICE_STATE_RECORDING || vs == TIANJI_VOICE_STATE_CONNECTING) {
                 lv_obj_set_style_text_color(lbl_net, lv_color_hex(COLOR_CYAN), 0);
-                lv_label_set_text(lbl_net, "聆听");
+                lv_label_set_text(lbl_net, "倾听");
             } else if (vs == TIANJI_VOICE_STATE_PLAYING) {
                 lv_obj_set_style_text_color(lbl_net, lv_color_hex(COLOR_CYAN), 0);
                 lv_label_set_text(lbl_net, "诵读");
@@ -277,9 +277,9 @@ static void render_view_standby(void) {
         lv_obj_set_style_text_align(vol_lbl, LV_TEXT_ALIGN_CENTER, 0);
         int volume = tianji_volume_get();
         if (volume >= 0) {
-            lv_label_set_text_fmt(vol_lbl, "音量 %d%%｜上下键调节", volume);
+            lv_label_set_text_fmt(vol_lbl, "音量 %d%%·上下键调节", volume);
         } else {
-            lv_label_set_text(vol_lbl, "音量 --%｜上下键调节");
+            lv_label_set_text(vol_lbl, "音量 --%·上下键调节");
         }
         lv_obj_align(vol_lbl, LV_ALIGN_TOP_MID, 0, 208);
     }
@@ -327,7 +327,7 @@ static void render_view_casting(void) {
         lv_obj_set_style_text_font(coin_lbl, &tianji_font_16, 0);
         lv_obj_set_style_text_color(coin_lbl, tianji_line_is_moving(t->type) ? lv_color_hex(COLOR_AMBER) : lv_color_hex(COLOR_CYAN), 0);
         lv_label_set_text(coin_lbl, tname);
-        lv_obj_set_pos(coin_lbl, 126, 13);
+        lv_obj_set_pos(coin_lbl, 118, 13);
     } else {
         lv_obj_t *coin_lbl = lv_label_create(coin_bar);
         lv_obj_set_style_text_font(coin_lbl, &tianji_font_16, 0);
@@ -498,7 +498,7 @@ static void render_view_overview(void) {
     if (tianji_net_is_enabled()) {
         build_footer(s_screen, "确定键占卜问卦  下键看经文");
     } else {
-        build_footer(s_screen, "下键看经文，长按2秒重起");
+        build_footer(s_screen, "确定键联网问卦  下键看经文");
     }
 }
 
@@ -737,7 +737,7 @@ static void adjust_volume(int delta) {
         return;
     }
     if (s_lbl_volume && lv_obj_is_valid(s_lbl_volume)) {
-        lv_label_set_text_fmt(s_lbl_volume, "音量 %d%%｜上下键调节", volume);
+        lv_label_set_text_fmt(s_lbl_volume, "音量 %d%%·上下键调节", volume);
     }
     tianji_audio_play(TIANJI_SFX_PAGE_FLIP);
 }
