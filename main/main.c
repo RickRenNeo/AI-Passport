@@ -84,8 +84,8 @@ static void tick_task(void *arg) {
             }
         }
 
-        uint8_t soc = 88;
-        bsp_battery_soc(&soc);
+        int soc_val = bsp_battery_soc();
+        uint8_t soc = (soc_val >= 0 && soc_val <= 100) ? (uint8_t)soc_val : 88;
 
         if (bsp_lvgl_lock(200)) {
             char time_buf[16];
