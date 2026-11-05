@@ -65,39 +65,39 @@ static void test_recording_stream_and_stop(void) {
     assert(data != NULL);
 }
 
-static void test_recording_max_30s_cutoff(void) {
+static void test_recording_max_buffer_cutoff(void) {
     ecard_voice_init();
     ecard_voice_start_recording();
 
-    int16_t pcm_1sec[16000];
-    for (int i = 0; i < 16000; ++i) pcm_1sec[i] = 100;
+    int16_t pcm_block[1600];
+    for (int i = 0; i < 1600; ++i) pcm_block[i] = 100;
 
     uint8_t rem = 0;
     uint8_t amp = 0;
 
-    // 连续写入 30 秒
-    for (int s = 0; s < 30; ++s) {
-        ecard_voice_write_pcm(pcm_1sec, 16000, &rem, &amp);
+    // 连续写入直到达到 16KB 缓存上限
+    bool still_recording = true;
+    for (int b = 0; b < 100 && still_recording; ++b) {
+        still_recording = ecard_voice_write_pcm(pcm_block, 1600, &rem, &amp);
     }
-    assert(rem == 0);
+    assert(!still_recording);
 
     // 再次写入应被截断
-    bool more = ecard_voice_write_pcm(pcm_1sec, 16000, &rem, &amp);
+    bool more = ecard_voice_write_pcm(pcm_block, 1600, &rem, &amp);
     assert(!more);
 
     const uint8_t *data = NULL;
     size_t len = 0;
     uint8_t dur = 0;
     ecard_voice_stop_recording(&data, &len, &dur);
-    assert(dur == 30);
-    assert(len == ECARD_VOICE_MAX_BUFFER); // 240,000 字节
+    assert(len == ECARD_VOICE_MAX_BUFFER);
 }
 
 int main(void) {
     printf("Running ecard_voice tests...\n");
     test_adpcm_encode_decode_sine_wave();
     test_recording_stream_and_stop();
-    test_recording_max_30s_cutoff();
+    test_recording_max_buffer_cutoff();
     printf("ecard_voice tests passed!\n");
     return 0;
 }

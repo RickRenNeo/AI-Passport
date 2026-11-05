@@ -9,10 +9,11 @@
 extern "C" {
 #endif
 
-#define ECARD_VOICE_MAX_SEC       30   // 单次录音最长 30 秒
+#define ECARD_VOICE_MAX_SEC       30   // 单次录音最长 30 秒逻辑上限
 #define ECARD_VOICE_SAMPLE_RATE   16000// 16kHz
 #define ECARD_VOICE_BYTES_PER_SEC 8000 // 16000 * 4-bit = 8000 bytes/s
-#define ECARD_VOICE_MAX_BUFFER    (ECARD_VOICE_MAX_SEC * ECARD_VOICE_BYTES_PER_SEC) // 240,000 bytes (240KB)
+// ESP32-C3 无 PSRAM，静态常驻缓冲控制在 16KB，避免占用过多 BSS 造成链接溢出
+#define ECARD_VOICE_MAX_BUFFER    (16 * 1024)
 
 typedef enum {
     ECARD_VOICE_IDLE = 0,
