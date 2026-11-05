@@ -139,7 +139,7 @@ void ecard_ui_create(void) {
     lv_obj_clear_flag(s_panel_identity, LV_OBJ_FLAG_SCROLLABLE);
 
     s_lbl_name_class = lv_label_create(s_panel_identity);
-    char name_class_buf[64];
+    char name_class_buf[128];
     snprintf(name_class_buf, sizeof(name_class_buf), "%s  ·  %s", prof->student_name, prof->class_name);
     lv_label_set_text(s_lbl_name_class, name_class_buf);
     lv_obj_align(s_lbl_name_class, LV_ALIGN_TOP_MID, 0, 2);
@@ -235,7 +235,7 @@ void ecard_ui_refresh_content(void) {
         if (s_panel_identity) lv_obj_add_flag(s_panel_identity, LV_OBJ_FLAG_HIDDEN);
         if (s_panel_unread) {
             lv_obj_clear_flag(s_panel_unread, LV_OBJ_FLAG_HIDDEN);
-            char title_buf[64];
+            char title_buf[128];
             snprintf(title_buf, sizeof(title_buf), "%s (%ds)", prof->voice.sender, prof->voice.duration_sec);
             lv_label_set_text(s_lbl_unread_title, title_buf);
         }
