@@ -42,11 +42,13 @@ static void test_network_operations(void) {
     bool has_new = false;
     char sender[32] = {0};
     uint8_t dur = 0;
+    uint32_t message_id = 0;
 
-    bool ok = ecard_network_poll_recess_messages(&has_new, sender, &dur);
+    bool ok = ecard_network_poll_recess_messages(&has_new, sender, &dur, &message_id);
     assert(ok);
-    assert(has_new);
-    assert(dur > 0);
+    // 校园服务端未接入前，查询成功但没有新留言，不能凭空造未读。
+    assert(!has_new);
+    assert(message_id == 0);
 
     uint8_t dummy_adpcm[16] = {0};
     ok = ecard_network_upload_voice(dummy_adpcm, 16, 2);

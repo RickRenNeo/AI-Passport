@@ -9,11 +9,18 @@
 extern "C" {
 #endif
 
-#define ECARD_VOICE_MAX_SEC       30   // 单次录音最长 30 秒逻辑上限
-#define ECARD_VOICE_SAMPLE_RATE   16000// 16kHz
-#define ECARD_VOICE_BYTES_PER_SEC 8000 // 16000 * 4-bit = 8000 bytes/s
-// ESP32-C3 无 PSRAM，静态常驻缓冲控制在 16KB，避免占用过多 BSS 造成链接溢出
-#define ECARD_VOICE_MAX_BUFFER    (16 * 1024)
+#define ECARD_VOICE_MAX_SEC       15   // 界面进度条上限
+// 实际录音按需分配，最多 10 秒（40 KB）：超过会和小智 TLS/Opus 抢堆。
+#define ECARD_VOICE_RECORD_SEC    10
+// 采集、编码、回放全部统一 16 kHz，和 BSP 已验证的 I2S 时钟一致；
+// 4-bit IMA-ADPCM 在 16 kHz 下是 64 kbps，频响 8 kHz。
+#define ECARD_VOICE_SAMPLE_RATE   16000   // I2S 采集/回放采样率
+// 本地存档降到 8 kHz：48 KB 内存即可录 10 秒以上，回放时再插值回 16 kHz。
+#define ECARD_VOICE_STORE_RATE    8000
+#define ECARD_VOICE_BYTES_PER_SEC 4000    // 8 kHz × 4-bit ADPCM
+// 15 秒 × 8 KB/s = 120 KB。ESP32-C3 无 PSRAM，改为录音开始时从堆按需分配；
+// 分配失败会逐级减半，实际容量以 ecard_voice_buffer_capacity() 为准。
+#define ECARD_VOICE_MAX_BUFFER    (ECARD_VOICE_BYTES_PER_SEC * ECARD_VOICE_MAX_SEC)
 
 typedef enum {
     ECARD_VOICE_IDLE = 0,
@@ -22,24 +29,43 @@ typedef enum {
 } ecard_voice_state_t;
 
 /**
- * @brief 初始化语音缓存与编码器状态
+ * @brief 初始化语音缓存与编码器状态，并释放上一次残留的录音缓冲
  */
 void ecard_voice_init(void);
 
 /**
+ * @brief 开机预留录音缓冲（不受后续堆碎片影响）
+ *
+ * 建议在 app 初始化阶段、Wi-Fi 与界面启动之前调用。
+ * 预留后再开始录音，容量固定为传入字节数。
+ */
+void ecard_voice_reserve(size_t bytes);
+
+/** 释放预留缓冲（例如需要给 TLS/Opus 会话腾内存时）。 */
+void ecard_voice_release_reserve(void);
+
+/**
+ * @brief 本次录音实际可用的 ADPCM 缓冲容量（字节）
+ *
+ * 堆不足时会降级到 ECARD_VOICE_MAX_BUFFER 的一半或四分之一，
+ * 因此调用方不能用 ECARD_VOICE_MAX_BUFFER 假定实际时长。
+ */
+size_t ecard_voice_buffer_capacity(void);
+
+/**
  * @brief 开始录制新留言
- * @return true 启动成功, false 处于忙碌状态
+ * @return true 启动成功, false 处于忙碌状态或缓冲分配失败
  */
 bool ecard_voice_start_recording(void);
 
 /**
- * @brief 流式写入采集到的 16-bit 单声道 PCM 样本并转为 ADPCM 存入缓存
+ * @brief 流式写入采集到的 16-bit 单声道 PCM 并转 ADPCM 存入缓存
  *
- * @param pcm_samples 输入 16-bit PCM 数组
- * @param sample_count 样本数量
+ * @param pcm_samples 输入 16 kHz PCM 数组
+ * @param sample_count 输入样本数量
  * @param out_remaining_sec 输出当前剩余秒数 (0..30)
  * @param out_amplitude 输出当前音频平均振幅 (0..100)
- * @return true 写入成功, false 已达到 30 秒上限已自动停止
+ * @return true 写入成功, false 缓冲已满并自动停止
  */
 bool ecard_voice_write_pcm(const int16_t *pcm_samples,
                            size_t sample_count,
@@ -47,7 +73,7 @@ bool ecard_voice_write_pcm(const int16_t *pcm_samples,
                            uint8_t *out_amplitude);
 
 /**
- * @brief 停止录制并封包
+ * @brief 停止录制并封包，缓冲保留供本地回放
  *
  * @param out_adpcm_data 输出 ADPCM 数据缓冲区指针
  * @param out_data_len 输出总字节数
@@ -65,6 +91,50 @@ ecard_voice_state_t ecard_voice_get_state(void);
  * @brief 重置录音缓存
  */
 void ecard_voice_reset(void);
+
+/**
+ * @brief 是否存在一段可本地回放的录音
+ */
+bool ecard_voice_has_clip(void);
+
+/**
+ * @brief 开始回放最近一段录音
+ * @return true 已进入回放状态, false 没有可用录音
+ */
+bool ecard_voice_playback_start(void);
+
+/**
+ * @brief 回放内置演示留言（网络留言没有音频负载时使用）
+ * @return true 已进入回放状态
+ */
+bool ecard_voice_playback_start_demo(void);
+
+/** 内置演示留言的时长（秒），用于匹配留言卡片与播放进度。 */
+uint8_t ecard_voice_demo_duration_sec(void);
+
+/**
+ * @brief 取出回放 PCM（16 kHz 单声道，一个 ADPCM 半字节对应一个样本）
+ *
+ * @param pcm_out 输出缓冲
+ * @param max_samples 最多写入的 16 kHz 样本数
+ * @return 实际写入样本数；0 表示回放结束
+ */
+size_t ecard_voice_playback_read(int16_t *pcm_out, size_t max_samples);
+
+/**
+ * @brief 终止回放（不清除录音缓冲）
+ */
+void ecard_voice_playback_stop(void);
+
+/**
+ * @brief 释放录音缓冲；下次录音会自动重新分配
+ */
+void ecard_voice_clip_release(void);
+
+/**
+ * @brief 本次录音的峰值电平（0..32767），用于判断麦克风增益是否削顶
+ */
+uint16_t ecard_voice_peak_level(void);
 
 /**
  * @brief 单个 IMA-ADPCM 样本编码辅助函数

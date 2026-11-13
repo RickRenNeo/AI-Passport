@@ -12,6 +12,8 @@ extern "C" {
 // 默认预置校园 WiFi 凭证 (若 NVS 为空时回退)
 #define ECARD_DEFAULT_CAMPUS_SSID "School_Secure_WiFi"
 #define ECARD_DEFAULT_CAMPUS_PASS "Campus@2026#Wifi"
+// 演示留言的固定 ID：调用方按 ID 去重，已读后刷新不会再弹回未读。
+#define ECARD_DEMO_MESSAGE_ID 1001u
 
 typedef struct {
     char ssid[33];
@@ -58,9 +60,11 @@ bool ecard_network_is_recess_time(uint8_t hour, uint8_t minute);
  * @param out_has_new 是否获取到新未读留言
  * @param out_sender 留言发送者
  * @param out_duration 留言时长 (秒)
+ * @param out_message_id 留言唯一 ID；调用方据此去重，已读的旧留言不会重新出现
  * @return true 检查成功, false 连接超时或网络失败
  */
-bool ecard_network_poll_recess_messages(bool *out_has_new, char *out_sender, uint8_t *out_duration);
+bool ecard_network_poll_recess_messages(bool *out_has_new, char *out_sender,
+                                        uint8_t *out_duration, uint32_t *out_message_id);
 
 /**
  * @brief 上传学生录制的语音留言 (按需连网 -> 上报 -> 立即断网)

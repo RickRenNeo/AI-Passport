@@ -7,9 +7,12 @@ static void test_profile_defaults(void) {
     ecard_profile_init_default();
     const ecard_profile_t *p = ecard_profile_get();
     assert(p != NULL);
+    assert(strcmp(p->school_name, "XX市第一实验学校") == 0);
     assert(strcmp(p->student_name, "张小明") == 0);
-    assert(strcmp(p->class_name, "初二 (3) 班") == 0);
-    assert(strcmp(p->student_id, "2026110508") == 0);
+    assert(strcmp(p->class_name, "一(8)班") == 0);
+    assert(strcmp(p->student_id, "20260101") == 0);
+    assert(strcmp(p->valid_from, "2026.09") == 0);
+    assert(strcmp(p->valid_to, "2032.07") == 0);
     assert(p->role == ECARD_ROLE_STUDENT);
     assert(!p->theme.is_customized); // 方案 A 预置
     assert(p->theme.watermark == ECARD_WATERMARK_EMBLEM);

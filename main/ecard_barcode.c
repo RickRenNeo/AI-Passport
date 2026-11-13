@@ -86,6 +86,52 @@ bool ecard_barcode_encode_code128(const char *text, uint8_t *modules, size_t max
     return true;
 }
 
+bool ecard_barcode_encode_code128_auto(const char *text, uint8_t *modules, size_t max_modules, size_t *out_count) {
+    if (!text || !modules || !out_count) return false;
+
+    const size_t len = strlen(text);
+    if (len == 0 || len > 32) return false;
+
+    // 仅当全部为数字且位数为偶数时使用 Code128C
+    bool can_use_c = (len % 2 == 0);
+    for (size_t i = 0; can_use_c && i < len; ++i) {
+        if (text[i] < '0' || text[i] > '9') can_use_c = false;
+    }
+    if (!can_use_c) {
+        return ecard_barcode_encode_code128(text, modules, max_modules, out_count);
+    }
+
+    const size_t symbol_count = len / 2;
+    // 起始静区(10) + 起始符C(11) + 每对数字(11) + 校验(11) + 终止符(13) + 结束静区(10)
+    const size_t needed = 20 + 11 + (symbol_count * 11) + 11 + 13;
+    if (needed > max_modules) return false;
+
+    size_t offset = 0;
+    for (int i = 0; i < 10; ++i) {
+        modules[offset++] = 0;
+    }
+
+    // 起始符 C (代码值 105)
+    append_pattern(k_code128_patterns[105], modules, &offset);
+    uint32_t checksum = 105;
+
+    for (size_t i = 0; i < symbol_count; ++i) {
+        const int value = (text[i * 2] - '0') * 10 + (text[i * 2 + 1] - '0');
+        append_pattern(k_code128_patterns[value], modules, &offset);
+        checksum += (uint32_t)(i + 1) * (uint32_t)value;
+    }
+
+    append_pattern(k_code128_patterns[checksum % 103], modules, &offset);
+    append_pattern(k_code128_patterns[106], modules, &offset);
+
+    for (int i = 0; i < 10; ++i) {
+        modules[offset++] = 0;
+    }
+
+    *out_count = offset;
+    return true;
+}
+
 bool ecard_barcode_render_vertical_rgb565(const char *text,
                                          uint16_t *dst_rgb565,
                                          int width,
@@ -96,7 +142,7 @@ bool ecard_barcode_render_vertical_rgb565(const char *text,
 
     uint8_t modules[ECARD_BARCODE_MAX_MODULES];
     size_t module_count = 0;
-    if (!ecard_barcode_encode_code128(text, modules, sizeof(modules), &module_count)) {
+    if (!ecard_barcode_encode_code128_auto(text, modules, sizeof(modules), &module_count)) {
         return false;
     }
 

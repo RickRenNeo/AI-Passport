@@ -23,6 +23,20 @@ extern "C" {
 bool ecard_barcode_encode_code128(const char *text, uint8_t *modules, size_t max_modules, size_t *out_count);
 
 /**
+ * @brief 自动选择最优 Code128 子集编码学工号
+ *
+ * 偶数位纯数字使用 Code128C (每两个数字一个符号，条码更短更易扫描)；
+ * 其他情况回退到 Code128B。输出格式与 ecard_barcode_encode_code128 一致。
+ *
+ * @param text 输入文本 (通常是学工号)
+ * @param modules 输出模块缓冲区 (0 = 空白, 1 = 黑色线条)
+ * @param max_modules 缓冲区大小
+ * @param out_count 实际输出的 module 总数量 (含静区)
+ * @return true 编码成功, false 文本过长或包含不支持字符
+ */
+bool ecard_barcode_encode_code128_auto(const char *text, uint8_t *modules, size_t max_modules, size_t *out_count);
+
+/**
  * @brief 将条码渲染为旋转90度的纵向 RGB565 位图 (用于工牌左侧区域显示)
  *
  * @param text 输入学工号

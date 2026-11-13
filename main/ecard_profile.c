@@ -46,10 +46,13 @@ ecard_badge_theme_t ecard_theme_get_preset_a(ecard_role_t role) {
 void ecard_profile_init_default(void) {
     memset(&s_current_profile, 0, sizeof(s_current_profile));
 
-    strncpy(s_current_profile.school_name, "XX市第一实验学校", sizeof(s_current_profile.school_name) - 1);
+    strncpy(s_current_profile.school_name, "XX市第一实验学校",
+            sizeof(s_current_profile.school_name) - 1);
     strncpy(s_current_profile.student_name, "张小明", sizeof(s_current_profile.student_name) - 1);
-    strncpy(s_current_profile.class_name, "初二 (3) 班", sizeof(s_current_profile.class_name) - 1);
-    strncpy(s_current_profile.student_id, "2026110508", sizeof(s_current_profile.student_id) - 1);
+    strncpy(s_current_profile.class_name, "一(8)班", sizeof(s_current_profile.class_name) - 1);
+    strncpy(s_current_profile.student_id, "20260101", sizeof(s_current_profile.student_id) - 1);
+    strncpy(s_current_profile.valid_from, "2026.09", sizeof(s_current_profile.valid_from) - 1);
+    strncpy(s_current_profile.valid_to, "2032.07", sizeof(s_current_profile.valid_to) - 1);
 
     s_current_profile.role = ECARD_ROLE_STUDENT;
     s_current_profile.theme = ecard_theme_get_preset_a(s_current_profile.role);
@@ -61,6 +64,38 @@ void ecard_profile_init_default(void) {
     s_current_profile.voice.timestamp = 0;
 
     s_profile_inited = true;
+}
+
+static void copy_str(char *dst, size_t size, const char *src);
+
+void ecard_profile_apply_identity(const ecard_identity_t *identity) {
+    if (!identity) return;
+
+    memset(&s_current_profile, 0, sizeof(s_current_profile));
+    copy_str(s_current_profile.school_name, sizeof(s_current_profile.school_name),
+             identity->school_name);
+    copy_str(s_current_profile.student_name, sizeof(s_current_profile.student_name),
+             identity->student_name);
+    copy_str(s_current_profile.class_name, sizeof(s_current_profile.class_name),
+             identity->class_name);
+    copy_str(s_current_profile.student_id, sizeof(s_current_profile.student_id),
+             identity->student_id);
+    copy_str(s_current_profile.valid_from, sizeof(s_current_profile.valid_from), "2026.09");
+    copy_str(s_current_profile.valid_to, sizeof(s_current_profile.valid_to), "2032.07");
+    s_current_profile.role = identity->role;
+    s_current_profile.theme = ecard_theme_get_preset_a(s_current_profile.role);
+    s_current_profile.voice.has_unread = false;
+    s_profile_inited = true;
+}
+
+static void copy_str(char *dst, size_t size, const char *src) {
+    if (!dst || size == 0) return;
+    dst[0] = '\0';
+    if (!src) return;
+    size_t len = strlen(src);
+    if (len >= size) len = size - 1;
+    memcpy(dst, src, len);
+    dst[len] = '\0';
 }
 
 const ecard_profile_t *ecard_profile_get(void) {

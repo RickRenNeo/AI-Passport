@@ -59,17 +59,17 @@ bool ecard_network_is_recess_time(uint8_t hour, uint8_t minute) {
     return false;
 }
 
-bool ecard_network_poll_recess_messages(bool *out_has_new, char *out_sender, uint8_t *out_duration) {
+bool ecard_network_poll_recess_messages(bool *out_has_new, char *out_sender,
+                                        uint8_t *out_duration, uint32_t *out_message_id) {
     if (!out_has_new) return false;
 
-    // 默认测试桩模拟：成功连网查询
-    *out_has_new = true;
-    if (out_sender) {
-        strncpy(out_sender, "妈妈", 16);
-    }
-    if (out_duration) {
-        *out_duration = 12; // 12秒语音
-    }
+    // 校园服务端尚未接入：这里只报告“查询成功、没有新留言”。
+    // 之前用固定 ID 伪造一条“李老师”留言，会让用户在首页按 UP 时
+    // 凭空多出一条未读，和真实行为不符，所以不再伪造。
+    *out_has_new = false;
+    (void)out_sender;
+    (void)out_duration;
+    (void)out_message_id;
 
     return true;
 }

@@ -35,6 +35,45 @@ static void test_encode_code128_basic(void) {
     assert(!ecard_barcode_encode_code128(NULL, modules, sizeof(modules), &count));
 }
 
+static void test_encode_code128_auto(void) {
+    uint8_t modules[ECARD_BARCODE_MAX_MODULES];
+    size_t count = 0;
+    size_t count_b = 0;
+
+    // 偶数位纯数字 -> Code128C: 20 + 11 + 5*11 + 11 + 13 = 110
+    bool ok = ecard_barcode_encode_code128_auto("2026110508", modules, sizeof(modules), &count);
+    assert(ok);
+    assert(count == 110);
+
+    // 起始符 C (105) 的 "211232" 模式
+    assert(modules[10] == 1 && modules[11] == 1);
+    assert(modules[12] == 0);
+    assert(modules[13] == 1);
+    assert(modules[14] == 0 && modules[15] == 0);
+    assert(modules[16] == 1 && modules[17] == 1 && modules[18] == 1);
+    assert(modules[19] == 0 && modules[20] == 0);
+
+    // 与 Code128B 相比明显更短
+    ok = ecard_barcode_encode_code128("2026110508", modules, sizeof(modules), &count_b);
+    assert(ok && count_b == 165);
+    assert(count < count_b);
+
+    // 奇数位数字回退到 Code128B
+    ok = ecard_barcode_encode_code128_auto("202611050", modules, sizeof(modules), &count);
+    assert(ok && count == 154);
+
+    // 含字母回退到 Code128B
+    ok = ecard_barcode_encode_code128_auto("A2026", modules, sizeof(modules), &count);
+    assert(ok && count == 20 + 11 + 5 * 11 + 11 + 13);
+
+    // 边界与错误输入
+    assert(!ecard_barcode_encode_code128_auto("", modules, sizeof(modules), &count));
+    assert(!ecard_barcode_encode_code128_auto(NULL, modules, sizeof(modules), &count));
+    assert(!ecard_barcode_encode_code128_auto("2026110508", modules, 100, &count));
+    assert(!ecard_barcode_encode_code128_auto("1234567890123456789012345678901234",
+                                              modules, sizeof(modules), &count));
+}
+
 static void test_render_vertical_rgb565(void) {
     uint16_t buffer[80 * 175];
     memset(buffer, 0, sizeof(buffer));
@@ -59,6 +98,7 @@ static void test_render_vertical_rgb565(void) {
 int main(void) {
     printf("Running ecard_barcode tests...\n");
     test_encode_code128_basic();
+    test_encode_code128_auto();
     test_render_vertical_rgb565();
     printf("ecard_barcode tests passed!\n");
     return 0;

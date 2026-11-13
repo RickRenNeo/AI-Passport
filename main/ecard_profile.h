@@ -51,10 +51,28 @@ typedef struct {
     char student_name[32];      // 姓名
     char class_name[32];        // 班级 / 院系
     char student_id[24];        // 学号 / 工号
+    char valid_from[12];        // 证件生效日期 (如 "2026.09")
+    char valid_to[12];          // 证件失效日期 (如 "2029.07")
     ecard_role_t role;          // 身份角色
     ecard_badge_theme_t theme;  // 徽章主题
     ecard_voice_message_t voice;// 当前未读消息状态
 } ecard_profile_t;
+
+/**
+ * @brief 首配向导写入的身份信息（学校/姓名/班级/学号或工号/角色）。
+ */
+typedef struct {
+    char school_name[48];
+    char student_name[32];
+    char class_name[32];
+    char student_id[24];
+    ecard_role_t role;
+} ecard_identity_t;
+
+/**
+ * @brief 用向导采集的身份覆盖当前档案，并刷新徽章主题。
+ */
+void ecard_profile_apply_identity(const ecard_identity_t *identity);
 
 /**
  * @brief 获取当前设备上的个人档案 (只读指针)

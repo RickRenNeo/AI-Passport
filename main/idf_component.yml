@@ -1,0 +1,8 @@
+## Managed dependencies added for the Xiaozhi integration.
+## esp_audio_codec provides the Opus encoder/decoder used by the protocol.
+## esp_websocket_client carries the Xiaozhi WebSocket transport.
+dependencies:
+  espressif/esp_audio_codec: "~2.5.0"
+  espressif/esp_websocket_client: "~1.5.0"
+  # Keep the LVGL version the fonts and sdkconfig were validated against.
+  lvgl/lvgl: "9.5.0"
