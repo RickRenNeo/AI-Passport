@@ -9,6 +9,7 @@
 #endif
 
 static ecard_setup_t s_setup;
+static char s_relay_url[ECARD_RELAY_URL_MAX];
 static bool s_loaded;
 
 static void copy_field(char *dst, size_t dst_size, const char *src) {
@@ -37,6 +38,7 @@ static bool save_blob(void) {
 void ecard_setup_init(void) {
     memset(&s_setup, 0, sizeof(s_setup));
     s_setup.role = ECARD_ACCOUNT_STUDENT;
+    memset(s_relay_url, 0, sizeof(s_relay_url));
 
 #if defined(ESP_PLATFORM)
     nvs_handle_t handle;
@@ -45,6 +47,10 @@ void ecard_setup_init(void) {
         if (nvs_get_blob(handle, "config", &s_setup, &size) != ESP_OK || size == 0) {
             memset(&s_setup, 0, sizeof(s_setup));
             s_setup.role = ECARD_ACCOUNT_STUDENT;
+        }
+        size_t url_len = sizeof(s_relay_url);
+        if (nvs_get_str(handle, "relay_url", s_relay_url, &url_len) != ESP_OK) {
+            s_relay_url[0] = '\0';
         }
         nvs_close(handle);
     }
@@ -111,16 +117,67 @@ bool ecard_setup_save_wifi(const char *ssid, const char *password) {
 #endif
 }
 
-bool ecard_setup_clear(void) {
-    memset(&s_setup, 0, sizeof(s_setup));
-    s_setup.role = ECARD_ACCOUNT_STUDENT;
+const char *ecard_setup_get_relay_url(void) {
+    if (!s_loaded) ecard_setup_init();
+    return s_relay_url;
+}
+
+bool ecard_setup_save_relay_url(const char *url) {
+    if (!s_loaded) ecard_setup_init();
+    if (!url || !url[0]) {
+        s_relay_url[0] = '\0';
+#if defined(ESP_PLATFORM)
+        nvs_handle_t handle;
+        if (nvs_open(SETUP_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) return false;
+        const esp_err_t err = nvs_erase_key(handle, "relay_url");
+        (void)nvs_commit(handle);
+        nvs_close(handle);
+        return err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND;
+#else
+        return true;
+#endif
+    }
+
+    while (*url == ' ' || *url == '\t') ++url;
+    size_t len = strlen(url);
+    while (len > 0 && (url[len - 1] == ' ' || url[len - 1] == '\t' || url[len - 1] == '/')) {
+        --len;
+    }
+    if (len == 0 || len >= ECARD_RELAY_URL_MAX) return false;
+
+    const bool is_http = (len > 7 && strncmp(url, "http://", 7) == 0);
+    const bool is_https = (len > 8 && strncmp(url, "https://", 8) == 0);
+    if (!is_http && !is_https) return false;
+
+    memcpy(s_relay_url, url, len);
+    s_relay_url[len] = '\0';
 #if defined(ESP_PLATFORM)
     nvs_handle_t handle;
     if (nvs_open(SETUP_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) return false;
-    const esp_err_t err = nvs_erase_key(handle, "config");
+    const esp_err_t err = nvs_set_str(handle, "relay_url", s_relay_url);
+    if (err == ESP_OK) {
+        (void)nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err == ESP_OK;
+#else
+    return true;
+#endif
+}
+
+bool ecard_setup_clear(void) {
+    memset(&s_setup, 0, sizeof(s_setup));
+    s_setup.role = ECARD_ACCOUNT_STUDENT;
+    memset(s_relay_url, 0, sizeof(s_relay_url));
+#if defined(ESP_PLATFORM)
+    nvs_handle_t handle;
+    if (nvs_open(SETUP_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) return false;
+    const esp_err_t err1 = nvs_erase_key(handle, "config");
+    const esp_err_t err2 = nvs_erase_key(handle, "relay_url");
     (void)nvs_commit(handle);
     nvs_close(handle);
-    return err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND;
+    return (err1 == ESP_OK || err1 == ESP_ERR_NVS_NOT_FOUND) &&
+           (err2 == ESP_OK || err2 == ESP_ERR_NVS_NOT_FOUND);
 #else
     return true;
 #endif

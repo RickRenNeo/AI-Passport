@@ -22,6 +22,8 @@ const char *ecard_portal_password(void) { return "passport1234"; }
 
 void ecard_time_start_sync(void) {}
 bool ecard_time_is_synced(void) { return false; }
+int64_t ecard_time_epoch_sec(void) { return 0; }
+void ecard_time_set_epoch(int64_t epoch_sec) { (void)epoch_sec; }
 void ecard_time_now(uint8_t *h, uint8_t *m, uint8_t *s) {
     if (h) *h = 9;
     if (m) *m = 40;

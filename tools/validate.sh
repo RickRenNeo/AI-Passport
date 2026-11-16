@@ -146,6 +146,7 @@ run_static_checks() {
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_verify_firmware.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_archive_firmware.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_install_passport_skills.py
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_relay_server.py
     rm -rf "${test_dir}"
     echo "Host tests: PASS"
 }

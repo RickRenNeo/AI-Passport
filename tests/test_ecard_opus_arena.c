@@ -121,6 +121,52 @@ static void test_arena_decoder_encoder_alternation(void) {
     assert(!ecard_opus_arena_busy());
 }
 
+static void test_arena_borrow_and_mutex_with_codec(void) {
+    assert(!ecard_opus_arena_busy());
+
+    uint8_t *buf = NULL;
+    size_t bytes = 0;
+    assert(ecard_opus_arena_borrow(&buf, &bytes));
+    assert(buf != NULL);
+    assert(bytes == ecard_opus_arena_size());
+    assert(ecard_opus_arena_busy());
+
+    // 二次借用必须被拒绝；归还前全部字节可安全读写
+    uint8_t *buf2 = NULL;
+    size_t bytes2 = 0;
+    assert(!ecard_opus_arena_borrow(&buf2, &bytes2));
+    memset(buf, 0x7E, bytes);
+
+    // 借出期间即使进入 encoder open 窗口，编码器也必须退回系统堆而不能踩坏录音缓冲
+    ecard_opus_arena_begin();
+    void *fallback = media_lib_module_malloc("enc", 24524);
+    ecard_opus_arena_end();
+    assert(fallback != NULL);
+    assert(fallback != buf);
+    for (size_t i = 0; i < bytes; ++i) {
+        assert(buf[i] == 0x7E);
+    }
+    media_lib_free(fallback);
+
+    // 归还后重新空闲
+    ecard_opus_arena_return(buf);
+    assert(!ecard_opus_arena_busy());
+
+    // Opus 占用期间不允许外部借出，释放后可再次借出
+    ecard_opus_arena_begin();
+    assert(!ecard_opus_arena_borrow(&buf2, &bytes2));
+    void *enc = media_lib_module_malloc("enc", 24524);
+    ecard_opus_arena_end();
+    assert(enc != NULL);
+    assert(!ecard_opus_arena_borrow(&buf2, &bytes2));
+    media_lib_free(enc);
+
+    assert(ecard_opus_arena_borrow(&buf2, &bytes2));
+    assert(buf2 == buf);
+    ecard_opus_arena_return(buf2);
+    assert(!ecard_opus_arena_busy());
+}
+
 int main(void) {
     printf("Running ecard_opus_arena tests...\n");
     test_arena_capacity_and_idle();
@@ -128,6 +174,7 @@ int main(void) {
     test_arena_overflow_guard();
     test_arena_calloc();
     test_arena_decoder_encoder_alternation();
+    test_arena_borrow_and_mutex_with_codec();
     printf("ecard_opus_arena tests passed!\n");
     return 0;
 }

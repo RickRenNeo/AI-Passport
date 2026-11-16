@@ -14,6 +14,8 @@
  */
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,11 +27,21 @@ void ecard_opus_arena_begin(void);
 /** 结束接管：之后的大块分配重新走系统堆。 */
 void ecard_opus_arena_end(void);
 
-/** 后备区是否正被编码器占用（用于日志与诊断）。 */
+/** 后备区是否正被编码器或外部借用占用（用于日志与诊断）。 */
 bool ecard_opus_arena_busy(void);
 
 /** 后备区容量（字节）。 */
 unsigned ecard_opus_arena_size(void);
+
+/**
+ * @brief 在 Opus 编解码空闲时借用 25 KB 静态后备区（供首页留言录音复用，避免堆碎片）。
+ *
+ * @return true 借用成功；false 后备区正忙或处于编码器打开窗口
+ */
+bool ecard_opus_arena_borrow(uint8_t **out_buf, size_t *out_bytes);
+
+/** 归还由 ecard_opus_arena_borrow() 借出的静态后备区。 */
+void ecard_opus_arena_return(const void *buf);
 
 #ifdef __cplusplus
 }

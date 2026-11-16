@@ -69,6 +69,8 @@ static bool s_ai_connected = false;
 // 设备页“长按 UP 重试”的瞬时状态：重连发起后先显示“正在重新连接”，
 // 连上或超时后回到常规文案。
 static bool s_net_retrying = false;
+static ecard_message_t s_playing_msg;
+static bool s_has_playing_msg = false;
 
 #if HAS_LVGL_RUNTIME
 
@@ -117,6 +119,7 @@ static lv_obj_t *s_msg_rows[ECARD_MESSAGES_MAX];
 static lv_obj_t *s_lbl_dev_battery = NULL;
 static lv_obj_t *s_bar_dev_battery = NULL;
 static lv_obj_t *s_lbl_dev_network = NULL;
+static lv_obj_t *s_lbl_dev_storage = NULL;
 static lv_obj_t *s_dev_note = NULL;
 static lv_obj_t *s_dev_note_badge = NULL;
 static lv_obj_t *s_lbl_dev_note_title = NULL;
@@ -177,6 +180,7 @@ static lv_obj_t *s_lbl_modal_big = NULL;
 static lv_obj_t *s_lbl_modal_kicker = NULL;
 static lv_obj_t *s_lbl_modal_title = NULL;
 static lv_obj_t *s_lbl_modal_sub = NULL;
+static lv_obj_t *s_lbl_modal_transcript = NULL;
 static lv_obj_t *s_lbl_modal_hint = NULL;
 static lv_obj_t *s_bar_modal = NULL;
 static lv_obj_t *s_wave_bars[11];
@@ -392,6 +396,7 @@ static void reset_page_pointers(void) {
     s_lbl_dev_battery = NULL;
     s_bar_dev_battery = NULL;
     s_lbl_dev_network = NULL;
+    s_lbl_dev_storage = NULL;
     s_dev_note = NULL;
     s_dev_note_badge = NULL;
     s_lbl_dev_note_title = NULL;
@@ -439,6 +444,7 @@ static void reset_page_pointers(void) {
     s_lbl_modal_kicker = NULL;
     s_lbl_modal_title = NULL;
     s_lbl_modal_sub = NULL;
+    s_lbl_modal_transcript = NULL;
     s_lbl_modal_hint = NULL;
     s_bar_modal = NULL;
     memset(s_wave_bars, 0, sizeof(s_wave_bars));
@@ -1501,8 +1507,9 @@ static void create_device_page(void) {
     make_label(card, "固件", &ecard_font_12, C_FAINT, 14, 94, 60, LV_TEXT_ALIGN_LEFT);
     make_label(card, "eCard 1.0.0", &ecard_font_16, C_INK, 94, 90, 100, LV_TEXT_ALIGN_RIGHT);
 
-    make_label(card, "存储", &ecard_font_12, C_FAINT, 14, 118, 60, LV_TEXT_ALIGN_LEFT);
-    make_label(card, "16 KB", &ecard_font_16, C_INK, 94, 114, 100, LV_TEXT_ALIGN_RIGHT);
+    make_label(card, "存储", &ecard_font_12, C_FAINT, 14, 118, 48, LV_TEXT_ALIGN_LEFT);
+    s_lbl_dev_storage = make_label(card, "0/20 条 · 0 KB", &ecard_font_12, C_INK, 62, 118, 132,
+                                   LV_TEXT_ALIGN_RIGHT);
 
     make_label(card, "模式", &ecard_font_12, C_FAINT, 14, 142, 60, LV_TEXT_ALIGN_LEFT);
     make_label(card, "电子学生证", &ecard_font_16, C_INK, 94, 138, 100, LV_TEXT_ALIGN_RIGHT);
@@ -1529,6 +1536,7 @@ static void reset_modal_pointers(void) {
     s_lbl_modal_kicker = NULL;
     s_lbl_modal_title = NULL;
     s_lbl_modal_sub = NULL;
+    s_lbl_modal_transcript = NULL;
     s_lbl_modal_hint = NULL;
     s_bar_modal = NULL;
     memset(s_wave_bars, 0, sizeof(s_wave_bars));
@@ -1604,25 +1612,95 @@ static void create_recording_modal(void) {
                                  200, LV_TEXT_ALIGN_CENTER);
 }
 
+static void playing_role_colors(ecard_sender_role_t role, uint32_t *bg, uint32_t *fg) {
+    switch (role) {
+    case ECARD_SENDER_TEACHER:
+        *bg = 0x3B2D63;
+        *fg = 0xDDD6FE;
+        break;
+    case ECARD_SENDER_SCHOOL_ADMIN:
+        *bg = 0x134E4A;
+        *fg = 0x99F6E4;
+        break;
+    case ECARD_SENDER_STUDENT:
+        *bg = 0x452A12;
+        *fg = 0xFCD34D;
+        break;
+    default:
+        *bg = C_NAVY_SOFT;
+        *fg = 0x93C5FD;
+        break;
+    }
+}
+
+static const char *playing_transcript_text(void) {
+    if (s_has_playing_msg && s_playing_msg.text[0]) {
+        return s_playing_msg.text;
+    }
+    if (s_has_playing_msg && s_playing_msg.pending_upload) {
+        return "正在识别语音文字…";
+    }
+    return "暂无文字转写内容";
+}
+
+static void apply_playing_transcript_style(void) {
+    if (!s_lbl_modal_transcript) return;
+    const char *txt = playing_transcript_text();
+    const bool empty = (!s_has_playing_msg || !s_playing_msg.text[0]);
+    const int32_t h16 = quiz_text_height(txt, &ecard_font_16, 184);
+    const lv_font_t *font = (h16 <= 114) ? &ecard_font_16 : &ecard_font_12;
+    lv_obj_set_style_text_font(s_lbl_modal_transcript, font, 0);
+    lv_obj_set_style_text_color(s_lbl_modal_transcript,
+                                lv_color_hex(empty ? C_FAINT : 0xF1F5F9), 0);
+    label_set_text(s_lbl_modal_transcript, txt);
+}
+
 static void create_playing_modal(void) {
     modal_begin(C_NAVY);
-    make_label(s_modal_container, "语音留言", &ecard_font_12, C_FAINT, 20, 28, 200,
+    make_label(s_modal_container, "语音留言 · 同步文字", &ecard_font_12, C_FAINT, 20, 14, 200,
                LV_TEXT_ALIGN_CENTER);
-    make_box(s_modal_container, 82, 50, 76, 76, C_NAVY, 0x2C4F78, 38);
-    lv_obj_t *avatar = make_box(s_modal_container, 92, 60, 56, 56, C_NAVY_SOFT, NO_BORDER, 28);
-    make_label(avatar, "家", &ecard_font_22, 0x93C5FD, 0, 10, 56, LV_TEXT_ALIGN_CENTER);
 
-    const ecard_profile_t *prof = ecard_profile_get();
-    char title[64];
-    snprintf(title, sizeof(title), "%s的留言", prof->voice.sender[0] ? prof->voice.sender : "家长");
-    s_lbl_modal_title = make_label(s_modal_container, title, &ecard_font_16, C_SURFACE, 20, 128,
-                                   200, LV_TEXT_ALIGN_CENTER);
-    s_lbl_modal_sub = make_label(s_modal_container, "正在播放", &ecard_font_12, C_FAINT, 20, 154,
-                                 200, LV_TEXT_ALIGN_CENTER);
-    modal_progress_bar(s_modal_container, 30, 188, 180, 0, 1);
+    const ecard_sender_role_t role =
+        s_has_playing_msg ? s_playing_msg.sender_role : ECARD_SENDER_PRIMARY_PARENT;
+    const char *badge_ch = ecard_messages_role_badge(role);
+    const char *role_name = ecard_messages_role_label(role);
+    const char *peer = (s_has_playing_msg && s_playing_msg.peer[0]) ? s_playing_msg.peer : "家长";
+
+    uint32_t badge_bg = C_NAVY_SOFT;
+    uint32_t badge_fg = 0x93C5FD;
+    playing_role_colors(role, &badge_bg, &badge_fg);
+    lv_obj_t *avatar = make_box(s_modal_container, 20, 38, 36, 36, badge_bg, 0x2C4F78, 18);
+    make_label(avatar, badge_ch, &ecard_font_16, badge_fg, 0, 8, 36, LV_TEXT_ALIGN_CENTER);
+
+    char title[48];
+    if (s_has_playing_msg && s_playing_msg.direction == ECARD_MESSAGE_SENT) {
+        snprintf(title, sizeof(title), "发给%s", peer);
+    } else {
+        snprintf(title, sizeof(title), "%s的留言", peer);
+    }
+    s_lbl_modal_title = make_label(s_modal_container, title, &ecard_font_16, C_SURFACE, 64, 36,
+                                   156, LV_TEXT_ALIGN_LEFT);
+
+    char sub[48];
+    if (s_has_playing_msg) {
+        char age[24];
+        ecard_messages_age_label(s_playing_msg.created_ms, age, sizeof(age));
+        snprintf(sub, sizeof(sub), "%s · %s", role_name, age);
+    } else {
+        snprintf(sub, sizeof(sub), "正在播放");
+    }
+    s_lbl_modal_sub = make_label(s_modal_container, sub, &ecard_font_12, C_FAINT, 64, 58,
+                                 156, LV_TEXT_ALIGN_LEFT);
+
+    lv_obj_t *text_card = make_box(s_modal_container, 16, 86, 208, 138, C_NAVY_SOFT, C_NAVY_LINE, 14);
+    s_lbl_modal_transcript = make_wrapped_label(text_card, "", &ecard_font_16, 0xF1F5F9,
+                                                12, 12, 184, 114, LV_TEXT_ALIGN_LEFT);
+    apply_playing_transcript_style();
+
+    modal_progress_bar(s_modal_container, 24, 238, 192, 0, 1);
     s_lbl_modal_big = make_label(s_modal_container, "00:00 / 00:00", &ecard_font_12, C_SURFACE,
-                                 30, 204, 180, LV_TEXT_ALIGN_CENTER);
-    s_lbl_modal_hint = make_label(s_modal_container, "按 OK 停止", &ecard_font_12, C_FAINT, 20, 252,
+                                 24, 254, 192, LV_TEXT_ALIGN_CENTER);
+    s_lbl_modal_hint = make_label(s_modal_container, "按 OK 停止", &ecard_font_12, C_FAINT, 20, 282,
                                   200, LV_TEXT_ALIGN_CENTER);
 }
 
@@ -1675,9 +1753,10 @@ static void create_sos_sent_modal(void) {
 
 static void update_home_content(void) {
     const ecard_profile_t *prof = ecard_profile_get();
-    const ecard_message_t *latest_unread = ecard_messages_latest_unread();
+    ecard_message_t latest_unread;
+    const bool has_unread_msg = ecard_messages_copy_latest_unread(&latest_unread);
     const int unread_count = ecard_messages_unread_count();
-    const bool unread = unread_count > 0;
+    const bool unread = unread_count > 0 && has_unread_msg;
 
     if (s_panel_identity) {
         char name_class[96];
@@ -1697,15 +1776,15 @@ static void update_home_content(void) {
     }
 
     if (s_panel_unread) {
-        if (unread && latest_unread) {
+        if (unread) {
             char title[64];
             char action[64];
-            snprintf(title, sizeof(title), "%s的语音留言", latest_unread->peer);
+            snprintf(title, sizeof(title), "%s的语音留言", latest_unread.peer);
             if (unread_count > 1) {
                 snprintf(action, sizeof(action), "共 %d 条未读 · 按 OK 收听", unread_count);
             } else {
                 snprintf(action, sizeof(action), "%u 秒 · 按 OK 收听",
-                         (unsigned)latest_unread->duration_sec);
+                         (unsigned)latest_unread.duration_sec);
             }
             label_set_text(s_lbl_unread_title, title);
             label_set_text(s_lbl_unread_action, action);
@@ -1718,6 +1797,29 @@ static void update_home_content(void) {
     if (s_lbl_hint) {
         label_set_text(s_lbl_hint, unread ? "按 OK 收听   ·   长按 OK 留言"
                                           : "OK 菜单 · 长按留言 · DOWN 求助");
+    }
+}
+
+static void list_role_colors(ecard_sender_role_t role, bool sent,
+                             uint32_t *bg, uint32_t *fg) {
+    if (sent || role == ECARD_SENDER_STUDENT) {
+        *bg = 0xFFF7E6;
+        *fg = 0xB45309;
+        return;
+    }
+    switch (role) {
+    case ECARD_SENDER_TEACHER:
+        *bg = 0xF3E8FF;
+        *fg = 0x7C3AED;
+        break;
+    case ECARD_SENDER_SCHOOL_ADMIN:
+        *bg = 0xCCFBF1;
+        *fg = 0x0F766E;
+        break;
+    default:
+        *bg = C_BLUE_SOFT;
+        *fg = C_BLUE;
+        break;
     }
 }
 
@@ -1741,11 +1843,11 @@ static void update_messages_content(void) {
     memset(s_msg_rows, 0, sizeof(s_msg_rows));
 
     for (int i = 0; i < count; ++i) {
-        const ecard_message_t *msg = ecard_messages_recent(i);
-        if (!msg) break;
+        ecard_message_t msg;
+        if (!ecard_messages_copy_recent(i, &msg)) break;
 
         const bool selected = (i == (int)s_msg_selection);
-        const bool sent = msg->direction == ECARD_MESSAGE_SENT;
+        const bool sent = msg.direction == ECARD_MESSAGE_SENT;
         lv_obj_t *row = make_box(s_msg_list, 0, 0, 200, 48,
                                  selected ? C_BLUE_SOFT : C_SURFACE,
                                  selected ? C_BLUE : C_LINE, 12);
@@ -1753,23 +1855,29 @@ static void update_messages_content(void) {
         lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE);
 
-        lv_obj_t *badge = make_box(row, 8, 8, 32, 32,
-                                   sent ? 0xFFF7E6 : C_BLUE_SOFT, NO_BORDER, 16);
-        make_label(badge, sent ? "发" : "收", &ecard_font_16, sent ? 0xB45309 : C_BLUE, 0, 7, 32,
-                   LV_TEXT_ALIGN_CENTER);
+        uint32_t badge_bg = C_BLUE_SOFT;
+        uint32_t badge_fg = C_BLUE;
+        list_role_colors(msg.sender_role, sent, &badge_bg, &badge_fg);
+        lv_obj_t *badge = make_box(row, 8, 8, 32, 32, badge_bg, NO_BORDER, 16);
+        make_label(badge, ecard_messages_role_badge(msg.sender_role), &ecard_font_16,
+                   badge_fg, 0, 7, 32, LV_TEXT_ALIGN_CENTER);
 
         static const lv_font_t *const peer_fonts[] = { &ecard_font_16, &ecard_font_12 };
-        make_label(row, msg->peer, fit_label_font(msg->peer, 110, peer_fonts, 2), C_INK, 50,
+        make_label(row, msg.peer, fit_label_font(msg.peer, 110, peer_fonts, 2), C_INK, 50,
                    5, 110, LV_TEXT_ALIGN_LEFT);
 
         char age[24];
-        char info[48];
-        ecard_messages_age_label(msg->created_ms, age, sizeof(age));
-        snprintf(info, sizeof(info), "%u 秒 · %s", (unsigned)msg->duration_sec, age);
+        char info[272];
+        ecard_messages_age_label(msg.created_ms, age, sizeof(age));
+        if (msg.text[0]) {
+            snprintf(info, sizeof(info), "%u秒·%s", (unsigned)msg.duration_sec, msg.text);
+        } else {
+            snprintf(info, sizeof(info), "%u 秒 · %s", (unsigned)msg.duration_sec, age);
+        }
         make_label(row, info, &ecard_font_12, C_MUTED, 50, 26, 138, LV_TEXT_ALIGN_LEFT);
 
         // 未读圆点只出现在收到的留言上；发出的留言天然是已读。
-        if (!sent && msg->unread) {
+        if (!sent && msg.unread) {
             make_box(row, 182, 21, 8, 8, C_BLUE, NO_BORDER, 4);
         }
         s_msg_rows[i] = row;
@@ -1851,6 +1959,17 @@ static void update_device_content(void) {
     if (s_lbl_dev_network) {
         label_set_text(s_lbl_dev_network, s_wifi_connected ? "校园网已连接" : "未连接");
     }
+    if (s_lbl_dev_storage) {
+        ecard_messages_storage_stats_t stats;
+        ecard_messages_get_storage_stats(&stats);
+        char st[40];
+        uint32_t kb = (stats.total_audio_bytes + 512u) / 1024u;
+        snprintf(st, sizeof(st), "%u/%u 条 · %lu KB",
+                 (unsigned)stats.message_count,
+                 (unsigned)stats.max_messages,
+                 (unsigned long)kb);
+        label_set_text(s_lbl_dev_storage, st);
+    }
     update_device_note();
 }
 
@@ -1864,10 +1983,13 @@ void ecard_ui_reset_navigation(void) {
     s_page = ECARD_UI_PAGE_HOME;
     s_modal = ECARD_UI_MODAL_NONE;
     s_menu_selection = 0;
+    s_msg_selection = 0;
     s_grade_selection = 0;
     s_deck_grade = 1;
     s_idle_elapsed_ms = 0;
     s_is_dimmed = false;
+    s_has_playing_msg = false;
+    memset(&s_playing_msg, 0, sizeof(s_playing_msg));
 }
 
 void ecard_ui_create(void) {
@@ -1894,6 +2016,8 @@ void ecard_ui_destroy(void) {
     reset_page_pointers();
 #endif
     s_modal = ECARD_UI_MODAL_NONE;
+    s_has_playing_msg = false;
+    memset(&s_playing_msg, 0, sizeof(s_playing_msg));
 }
 
 void ecard_ui_show_page(ecard_ui_page_t page) {
@@ -2072,6 +2196,8 @@ void ecard_ui_refresh_content(void) {
         update_menu_voice_sub();
     } else if (s_page == ECARD_UI_PAGE_QUIZ) {
         update_quiz_content();
+    } else if (s_page == ECARD_UI_PAGE_DEVICE) {
+        update_device_content();
     }
 #endif
 }
@@ -2126,7 +2252,7 @@ void ecard_ui_show_recording_modal(uint8_t remaining_sec, uint8_t audio_amplitud
         label_set_text(s_lbl_modal_big, sec);
     }
     if (s_bar_modal) {
-        lv_bar_set_range(s_bar_modal, 0, ECARD_VOICE_MAX_SEC);
+        lv_bar_set_range(s_bar_modal, 0, ECARD_VOICE_RECORD_SEC);
         lv_bar_set_value(s_bar_modal, remaining_sec, LV_ANIM_OFF);
     }
     update_waveform(audio_amplitude);
@@ -2165,6 +2291,25 @@ void ecard_ui_set_hint(const char *text) {
 #else
     (void)text;
 #endif
+}
+
+void ecard_ui_set_playing_message(const ecard_message_t *msg) {
+    if (msg) {
+        s_playing_msg = *msg;
+        s_has_playing_msg = true;
+    } else {
+        memset(&s_playing_msg, 0, sizeof(s_playing_msg));
+        s_has_playing_msg = false;
+    }
+#if HAS_LVGL_RUNTIME
+    if (s_modal == ECARD_UI_MODAL_PLAYING && s_modal_container) {
+        apply_playing_transcript_style();
+    }
+#endif
+}
+
+const ecard_message_t *ecard_ui_playing_message(void) {
+    return s_has_playing_msg ? &s_playing_msg : NULL;
 }
 
 void ecard_ui_show_playing_modal(uint8_t current_sec, uint8_t total_sec) {
@@ -2225,6 +2370,8 @@ void ecard_ui_show_sos_sent(void) {
 
 void ecard_ui_hide_modal(void) {
     s_modal = ECARD_UI_MODAL_NONE;
+    s_has_playing_msg = false;
+    memset(&s_playing_msg, 0, sizeof(s_playing_msg));
 #if HAS_LVGL_RUNTIME
     if (s_modal_container) {
         lv_obj_delete(s_modal_container);

@@ -1,3 +1,9 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 #include "ecard_app.h"
 #include "ecard_flashcard.h"
 #include "ecard_messages.h"
@@ -9,6 +15,9 @@
 #include "ecard_voice.h"
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 
 static void clear_unread_messages(void) {
@@ -461,6 +470,101 @@ static void test_ecard_app_ai_long_press_followup(void) {
     assert(ecard_quiz_selected() == selected);
 }
 
+static void test_ecard_app_playing_transcript_metadata(void) {
+    ecard_app_init();
+    clear_unread_messages();
+
+    ecard_message_t incoming;
+    memset(&incoming, 0, sizeof(incoming));
+    incoming.direction = ECARD_MESSAGE_RECEIVED;
+    incoming.sender_role = ECARD_SENDER_TEACHER;
+    incoming.duration_sec = 4;
+    incoming.unread = true;
+    snprintf(incoming.peer, sizeof(incoming.peer), "%s", "李老师");
+    snprintf(incoming.text, sizeof(incoming.text), "%s", "下午三点操场集合");
+    assert(ecard_messages_add(&incoming, 0) != 0);
+
+    // 首页点击 OK 播放最新未读：播放弹窗必须绑定发送方与转写文字
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
+    assert(ecard_app_get_state() == ECARD_APP_STATE_PLAYING);
+    const ecard_message_t *playing = ecard_ui_playing_message();
+    assert(playing != NULL);
+    assert(playing->sender_role == ECARD_SENDER_TEACHER);
+    assert(strcmp(playing->peer, "李老师") == 0);
+    assert(strcmp(playing->text, "下午三点操场集合") == 0);
+
+    // 停止播放后清除弹窗绑定元数据
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
+    assert(ecard_app_get_state() == ECARD_APP_STATE_IDLE);
+    assert(ecard_ui_playing_message() == NULL);
+}
+
+static unsigned g_record_full_calls = 0;
+
+static void on_test_record_full(void) {
+    g_record_full_calls++;
+}
+
+static void test_ecard_app_record_full_async_handoff(void) {
+    char dir[128];
+    snprintf(dir, sizeof(dir), "/tmp/ecard_app_rec_XXXXXX");
+    char *mk = mkdtemp(dir);
+    assert(mk != NULL);
+    assert(ecard_messages_mount_dir(dir));
+
+    ecard_app_init();
+    clear_unread_messages();
+    g_record_full_calls = 0;
+    ecard_app_set_record_full_cb(on_test_record_full);
+
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_LONG);
+    assert(ecard_app_get_state() == ECARD_APP_STATE_RECORDING);
+
+    int16_t frame[320];
+    for (int i = 0; i < 320; ++i) {
+        frame[i] = (int16_t)(1200 + (i % 30) * 40);
+    }
+    for (int b = 0; b < 505; ++b) {
+        ecard_app_feed_mic_pcm(frame, 320);
+    }
+
+    // 录满 10 秒后应仅触发一次异步收尾回调，绝不能在 audio 回调里直接写 SPIFFS
+    assert(g_record_full_calls == 1);
+    assert(ecard_app_get_state() == ECARD_APP_STATE_RECORDING);
+
+    uint8_t dur = 0;
+    size_t bytes = 0;
+    assert(ecard_app_begin_save_recording(&dur, &bytes));
+    assert(dur == ECARD_VOICE_RECORD_SEC);
+    assert(bytes == (size_t)ECARD_VOICE_RECORD_SEC * ECARD_VOICE_BYTES_PER_SEC);
+    assert(ecard_app_get_state() == ECARD_APP_STATE_IDLE);
+
+    // 落盘后必须立即释放 RAM 录音分段缓冲，再启动基于 SPIFFS 文件的本地试听
+    const uint32_t msg_id = ecard_app_persist_recorded_clip(dur);
+    assert(msg_id != 0);
+    assert(!ecard_voice_has_clip());
+
+    ecard_app_start_recorded_playback(msg_id, dur);
+    assert(ecard_app_get_state() == ECARD_APP_STATE_PLAYING);
+    assert(ecard_ui_get_modal() == ECARD_UI_MODAL_PLAYING);
+
+    int16_t out[320];
+    size_t total = 0;
+    while (ecard_app_render_playback_pcm(out, 320) > 0) {
+        total += 320;
+        assert(total <= 4 * bytes + 320);
+    }
+    assert(total >= 4 * bytes);
+    assert(ecard_app_get_state() == ECARD_APP_STATE_IDLE);
+    assert(ecard_ui_get_modal() == ECARD_UI_MODAL_NONE);
+
+    ecard_app_set_record_full_cb(NULL);
+    ecard_messages_mount_dir(NULL);
+    char rm_cmd[192];
+    snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s'", dir);
+    (void)system(rm_cmd);
+}
+
 int main(void) {
     printf("Running ecard_app tests...\n");
     test_ecard_app_recording_lifecycle();
@@ -478,6 +582,8 @@ int main(void) {
     test_ecard_app_pomodoro_flow();
     test_ecard_app_reset_page();
     test_ecard_app_ai_long_press_followup();
+    test_ecard_app_playing_transcript_metadata();
+    test_ecard_app_record_full_async_handoff();
     printf("ecard_app tests passed!\n");
     return 0;
 }

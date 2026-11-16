@@ -63,6 +63,20 @@ size_t ecard_app_render_playback_pcm(int16_t *out, size_t max_samples);
 /** 当前是否处于“小智追问”录音（仅编码上传，不写本地缓冲）。 */
 bool ecard_app_ai_listening(void);
 
+typedef void (*ecard_app_record_full_cb_t)(void);
+
+/** 注册录音录满上限时的异步收尾回调（投递给 input_task，避免在 audio_task 栈写 SPIFFS）。 */
+void ecard_app_set_record_full_cb(ecard_app_record_full_cb_t cb);
+
+/** 在 LVGL 锁内停止录音采音并校验有效性，随后释放锁再写盘。 */
+bool ecard_app_begin_save_recording(uint8_t *out_duration_sec, size_t *out_bytes);
+
+/** 在无 LVGL 锁状态下将录音持久化到 SPIFFS 并释放大内存、触发后台上传。 */
+uint32_t ecard_app_persist_recorded_clip(uint8_t duration_sec);
+
+/** 在 LVGL 锁内开启刚保存录音的本地试听与播放浮层。 */
+void ecard_app_start_recorded_playback(uint32_t local_msg_id, uint8_t duration_sec);
+
 #ifdef __cplusplus
 }
 #endif

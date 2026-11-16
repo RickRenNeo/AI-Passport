@@ -53,10 +53,15 @@ void ecard_voice_release_reserve(void);
 size_t ecard_voice_buffer_capacity(void);
 
 /**
- * @brief 开始录制新留言
+ * @brief 开始录制新留言（必要时优先复用空闲静态区并分段分配，规避连续大块堆碎片）
  * @return true 启动成功, false 处于忙碌状态或缓冲分配失败
  */
 bool ecard_voice_start_recording(void);
+
+/**
+ * @brief 以指定单块上限分段申请录音缓冲（max_chunk_bytes=0 为默认策略，主要用于单测覆盖分段边界）
+ */
+bool ecard_voice_start_recording_chunked(size_t max_chunk_bytes);
 
 /**
  * @brief 流式写入采集到的 16-bit 单声道 PCM 并转 ADPCM 存入缓存
@@ -73,14 +78,19 @@ bool ecard_voice_write_pcm(const int16_t *pcm_samples,
                            uint8_t *out_amplitude);
 
 /**
- * @brief 停止录制并封包，缓冲保留供本地回放
+ * @brief 停止录制并封包，缓冲保留供本地回放或落盘
  *
- * @param out_adpcm_data 输出 ADPCM 数据缓冲区指针
+ * @param out_adpcm_data 若缓冲连续则输出指针，分段分配时为 NULL（可配合 ecard_voice_save_to_file）
  * @param out_data_len 输出总字节数
  * @param out_duration_sec 输出实际录制时长 (秒)
  * @return true 录音有效且成功, false 无效或过短
  */
 bool ecard_voice_stop_recording(const uint8_t **out_adpcm_data, size_t *out_data_len, uint8_t *out_duration_sec);
+
+/**
+ * @brief 将当前已录制的分段 ADPCM 数据顺序写入文件（无需连续大块拷贝）
+ */
+bool ecard_voice_save_to_file(const char *path, size_t *out_bytes);
 
 /**
  * @brief 获取当前语音工作状态
@@ -108,6 +118,15 @@ bool ecard_voice_playback_start(void);
  * @return true 已进入回放状态
  */
 bool ecard_voice_playback_start_demo(void);
+
+/**
+ * @brief 从本地持久化文件（如 SPIFFS 的 .adp）流式解码回放 ADPCM 语音
+ *
+ * @param path      ADPCM 文件路径
+ * @param expand_8k true 表示 8 kHz 存档（回放时插值到 16 kHz），false 表示原生 16 kHz
+ * @return true 成功打开并进入回放状态
+ */
+bool ecard_voice_playback_start_file(const char *path, bool expand_8k);
 
 /** 内置演示留言的时长（秒），用于匹配留言卡片与播放进度。 */
 uint8_t ecard_voice_demo_duration_sec(void);

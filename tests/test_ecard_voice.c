@@ -199,6 +199,130 @@ static void test_demo_voice_playback(void) {
     assert(ecard_voice_get_state() == ECARD_VOICE_IDLE);
 }
 
+static void test_file_playback_round_trip(void) {
+    ecard_voice_init();
+    assert(ecard_voice_start_recording());
+
+    int16_t pcm_block[320];
+    uint8_t rem = 0;
+    uint8_t amp = 0;
+    for (int b = 0; b < 50; ++b) { // 1 second
+        for (int i = 0; i < 320; ++i) {
+            pcm_block[i] = (int16_t)(5000.0 * sin(2.0 * 3.1415926 * 350.0 * (b * 320 + i) / 16000.0));
+        }
+        assert(ecard_voice_write_pcm(pcm_block, 320, &rem, &amp));
+    }
+
+    const uint8_t *data = NULL;
+    size_t len = 0;
+    uint8_t dur = 0;
+    assert(ecard_voice_stop_recording(&data, &len, &dur));
+    assert(len == ECARD_VOICE_BYTES_PER_SEC);
+
+    char path[128];
+    snprintf(path, sizeof(path), "/tmp/ecard_voice_test_%d.adp", (int)len);
+    FILE *fp = fopen(path, "wb");
+    assert(fp != NULL);
+    assert(fwrite(data, 1, len, fp) == len);
+    fclose(fp);
+    ecard_voice_clip_release();
+
+    // 8 kHz mode expands each decoded sample twice -> 4 * len output samples
+    assert(ecard_voice_playback_start_file(path, true));
+    assert(ecard_voice_get_state() == ECARD_VOICE_PLAYING);
+    int16_t out[256];
+    size_t total_8k = 0;
+    int peak_8k = 0;
+    for (;;) {
+        size_t n = ecard_voice_playback_read(out, 256);
+        if (n == 0) break;
+        for (size_t i = 0; i < n; ++i) {
+            int v = abs((int)out[i]);
+            if (v > peak_8k) peak_8k = v;
+        }
+        total_8k += n;
+    }
+    assert(total_8k == 4 * len);
+    assert(peak_8k > 500);
+    assert(ecard_voice_get_state() == ECARD_VOICE_IDLE);
+
+    // 16 kHz native mode outputs 2 * len samples
+    assert(ecard_voice_playback_start_file(path, false));
+    size_t total_16k = 0;
+    for (;;) {
+        size_t n = ecard_voice_playback_read(out, 256);
+        if (n == 0) break;
+        total_16k += n;
+    }
+    assert(total_16k == 2 * len);
+    assert(ecard_voice_get_state() == ECARD_VOICE_IDLE);
+
+    (void)remove(path);
+    assert(!ecard_voice_playback_start_file("/tmp/nonexistent_ecard_voice.adp", true));
+}
+
+static void test_chunked_10s_recording_and_save_to_file(void) {
+    ecard_voice_init();
+    // 强制每段最多 4000 字节 -> 40000 字节需要 10 个分段拼满完整 10 秒
+    assert(ecard_voice_start_recording_chunked(4000));
+    const size_t expected_cap = (size_t)ECARD_VOICE_RECORD_SEC * ECARD_VOICE_BYTES_PER_SEC;
+    assert(ecard_voice_buffer_capacity() == expected_cap);
+
+    int16_t pcm_block[320];
+    uint8_t rem = 0;
+    uint8_t amp = 0;
+    // 10 秒 = 500 帧 (每帧 320 样本 = 20ms)；第 500 帧写满后返回 false 表示触顶
+    for (int b = 0; b < 500; ++b) {
+        for (int i = 0; i < 320; ++i) {
+            pcm_block[i] = (int16_t)(4500.0 * sin(2.0 * 3.1415926 * 420.0 * (b * 320 + i) / 16000.0));
+        }
+        bool cont = ecard_voice_write_pcm(pcm_block, 320, &rem, &amp);
+        if (b < 499) {
+            assert(cont);
+        } else {
+            // 写完第 40000 字节时正好写满，可能本次返回 false 或下一次返回 false
+            (void)cont;
+        }
+    }
+    assert(!ecard_voice_write_pcm(pcm_block, 320, &rem, &amp));
+
+    const uint8_t *contiguous = (const uint8_t *)0x1;
+    size_t len = 0;
+    uint8_t dur = 0;
+    assert(ecard_voice_stop_recording(&contiguous, &len, &dur));
+    assert(contiguous == NULL); // 多段模式不返回单片连续指针
+    assert(len == expected_cap);
+    assert(dur == ECARD_VOICE_RECORD_SEC);
+
+    const char *path = "/tmp/ecard_voice_chunked_10s.adp";
+    (void)remove(path);
+    size_t saved = 0;
+    assert(ecard_voice_save_to_file(path, &saved));
+    assert(saved == expected_cap);
+
+    // 释放所有分段缓冲后，从持久化文件流式回放依然完整还原 10 秒波形
+    ecard_voice_clip_release();
+    assert(!ecard_voice_has_clip());
+    assert(ecard_voice_playback_start_file(path, true));
+
+    int16_t out[320];
+    size_t total_samples = 0;
+    int peak = 0;
+    for (;;) {
+        size_t n = ecard_voice_playback_read(out, 320);
+        if (n == 0) break;
+        for (size_t i = 0; i < n; ++i) {
+            int v = abs((int)out[i]);
+            if (v > peak) peak = v;
+        }
+        total_samples += n;
+    }
+    assert(total_samples == 4 * expected_cap);
+    assert(peak > 500);
+    assert(ecard_voice_get_state() == ECARD_VOICE_IDLE);
+    (void)remove(path);
+}
+
 int main(void) {
     printf("Running ecard_voice tests...\n");
     test_adpcm_encode_decode_sine_wave();
@@ -207,6 +331,8 @@ int main(void) {
     test_playback_round_trip();
     test_playback_stop_and_silence_guard();
     test_demo_voice_playback();
+    test_file_playback_round_trip();
+    test_chunked_10s_recording_and_save_to_file();
     printf("ecard_voice tests passed!\n");
     return 0;
 }

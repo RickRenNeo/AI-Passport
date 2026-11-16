@@ -14,6 +14,12 @@ void ecard_time_start_sync(void);
 /** 时间是否已与网络对齐。 */
 bool ecard_time_is_synced(void);
 
+/** 返回当前 Unix 秒级时间戳；未校准时返回 0。 */
+int64_t ecard_time_epoch_sec(void);
+
+/** 使用中转服务端下发的 Unix 秒级时间戳辅助校准系统时钟（当 NTP 受限时兜底）。 */
+void ecard_time_set_epoch(int64_t epoch_sec);
+
 /**
  * @brief 读取当前时间。
  *

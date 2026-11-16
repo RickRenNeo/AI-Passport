@@ -10,7 +10,14 @@
 
 #include "ecard_opus_arena.h"
 
+#if defined(ESP_PLATFORM)
 #include <esp_log.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/portmacro.h>
+#else
+#define ESP_LOGI(tag, fmt, ...) do { (void)(tag); } while (0)
+#define ESP_LOGW(tag, fmt, ...) do { (void)(tag); } while (0)
+#endif
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,9 +34,18 @@ static const char *TAG = "opus_arena";
 static uint8_t s_arena[ARENA_BYTES] __attribute__((aligned(16)));
 
 static bool s_active;       // 处于 esp_audio_enc_open 窗口内
-static bool s_in_use;       // 后备区已被编码器拿走
+static bool s_in_use;       // 后备区已被编码器或外部借用拿走
 static size_t s_used;       // 当前占用的字节数（单块，便于回收）
 static void *s_owner;       // 后备区里那块内存的地址
+
+#if defined(ESP_PLATFORM)
+static portMUX_TYPE s_arena_mux = portMUX_INITIALIZER_UNLOCKED;
+#define ARENA_LOCK()   portENTER_CRITICAL(&s_arena_mux)
+#define ARENA_UNLOCK() portEXIT_CRITICAL(&s_arena_mux)
+#else
+#define ARENA_LOCK()   do {} while (0)
+#define ARENA_UNLOCK() do {} while (0)
+#endif
 
 static bool arena_contains(const void *ptr) {
     const uint8_t *p = (const uint8_t *)ptr;
@@ -37,19 +53,53 @@ static bool arena_contains(const void *ptr) {
 }
 
 void ecard_opus_arena_begin(void) {
+    ARENA_LOCK();
     s_active = true;
+    ARENA_UNLOCK();
 }
 
 void ecard_opus_arena_end(void) {
+    ARENA_LOCK();
     s_active = false;
+    ARENA_UNLOCK();
 }
 
 bool ecard_opus_arena_busy(void) {
-    return s_in_use;
+    ARENA_LOCK();
+    const bool busy = s_in_use;
+    ARENA_UNLOCK();
+    return busy;
 }
 
 unsigned ecard_opus_arena_size(void) {
     return ARENA_BYTES;
+}
+
+bool ecard_opus_arena_borrow(uint8_t **out_buf, size_t *out_bytes) {
+    if (!out_buf || !out_bytes) return false;
+    ARENA_LOCK();
+    if (s_active || s_in_use) {
+        ARENA_UNLOCK();
+        return false;
+    }
+    s_in_use = true;
+    s_owner = s_arena;
+    s_used = ARENA_BYTES;
+    ARENA_UNLOCK();
+    *out_buf = s_arena;
+    *out_bytes = ARENA_BYTES;
+    return true;
+}
+
+void ecard_opus_arena_return(const void *buf) {
+    if (!buf) return;
+    ARENA_LOCK();
+    if (buf == s_arena && s_in_use && s_owner == s_arena) {
+        s_in_use = false;
+        s_owner = NULL;
+        s_used = 0;
+    }
+    ARENA_UNLOCK();
 }
 
 /* ---- 覆盖 esp_audio_codec 的弱符号分配器 ------------------------------- */
