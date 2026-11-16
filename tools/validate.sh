@@ -75,70 +75,6 @@ run_static_checks() {
             -o "${test_dir}/test_demo_${demo}_runtime"
         "${test_dir}/test_demo_${demo}_runtime"
     done
-    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
-        tests/test_ecard_barcode.c main/ecard_barcode.c \
-        -o "${test_dir}/test_ecard_barcode"
-    "${test_dir}/test_ecard_barcode"
-    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
-        tests/test_ecard_profile.c main/ecard_profile.c \
-        -o "${test_dir}/test_ecard_profile"
-    "${test_dir}/test_ecard_profile"
-    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
-        tests/test_ecard_setup_validate.c main/ecard_setup_validate.c \
-        -o "${test_dir}/test_ecard_setup_validate"
-    "${test_dir}/test_ecard_setup_validate"
-    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
-        tests/test_ecard_setup_state.c main/ecard_setup.c main/ecard_setup_validate.c \
-        main/ecard_profile.c \
-        -o "${test_dir}/test_ecard_setup_state"
-    "${test_dir}/test_ecard_setup_state"
-    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
-        tests/test_ecard_quiz.c main/ecard_quiz.c \
-        -o "${test_dir}/test_ecard_quiz"
-    "${test_dir}/test_ecard_quiz"
-    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
-        tests/test_ecard_ai_prompt.c main/ecard_ai_prompt.c main/ecard_cards.c \
-        main/ecard_quiz.c \
-        -o "${test_dir}/test_ecard_ai_prompt"
-    "${test_dir}/test_ecard_ai_prompt"
-    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
-        tests/test_ecard_flashcard.c main/ecard_flashcard.c main/ecard_cards.c \
-        -o "${test_dir}/test_ecard_flashcard"
-    "${test_dir}/test_ecard_flashcard"
-    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
-        tests/test_ecard_pomodoro.c main/ecard_pomodoro.c \
-        -o "${test_dir}/test_ecard_pomodoro"
-    "${test_dir}/test_ecard_pomodoro"
-    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
-        tests/test_ecard_ui.c main/ecard_ui.c main/ecard_profile.c main/ecard_barcode.c \
-        main/ecard_quiz.c main/ecard_flashcard.c main/ecard_cards.c \
-        main/ecard_pomodoro.c main/ecard_messages.c main/ecard_voice.c main/ecard_setup.c \
-        main/ecard_setup_validate.c assets/sounds/ecard_demo_voice.c \
-        tests/ecard_stubs/ecard_link_stub.c \
-        -o "${test_dir}/test_ecard_ui"
-    "${test_dir}/test_ecard_ui"
-    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
-        tests/test_ecard_voice.c main/ecard_voice.c assets/sounds/ecard_demo_voice.c -lm \
-        -o "${test_dir}/test_ecard_voice"
-    "${test_dir}/test_ecard_voice"
-    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/bsp_stubs -Imain \
-        tests/test_ecard_opus_arena.c main/ecard_opus_arena.c \
-        -o "${test_dir}/test_ecard_opus_arena"
-    "${test_dir}/test_ecard_opus_arena"
-    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
-        tests/test_ecard_messages.c main/ecard_messages.c \
-        -o "${test_dir}/test_ecard_messages"
-    "${test_dir}/test_ecard_messages"
-    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
-        tests/test_ecard_network.c main/ecard_network.c \
-        -o "${test_dir}/test_ecard_network"
-    "${test_dir}/test_ecard_network"
-    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
-        -Itests/bsp_stubs -Icomponents/bsp/include -Imain \
-        tests/test_ecard_app.c main/ecard_app.c main/ecard_ui.c main/ecard_profile.c main/ecard_messages.c main/ecard_voice.c main/ecard_network.c main/ecard_barcode.c main/ecard_quiz.c main/ecard_ai_prompt.c main/ecard_flashcard.c main/ecard_cards.c main/ecard_pomodoro.c main/ecard_setup.c main/ecard_setup_validate.c assets/sounds/ecard_demo_voice.c tests/ecard_stubs/ecard_link_stub.c -lm \
-        -o "${test_dir}/test_ecard_app"
-    "${test_dir}/test_ecard_app"
-    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_ecard_fonts.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_battery_profile.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_deep_sleep_contract.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_key_wake_contract.py
@@ -146,7 +82,6 @@ run_static_checks() {
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_verify_firmware.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_archive_firmware.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_install_passport_skills.py
-    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_relay_server.py
     rm -rf "${test_dir}"
     echo "Host tests: PASS"
 }

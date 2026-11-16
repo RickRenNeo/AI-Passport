@@ -15,36 +15,6 @@
 - 添加字库前评估 Flash 与内部 RAM 影响；ESP32-C3 无 PSRAM。
 - 不提交许可不允许分发的字库。
 
-### eCard 界面字库
-
-[`fonts/`](fonts/) 保存 eCard 界面使用的五套 LVGL 点阵字库：
-`ecard_font_9.c`、`ecard_font_12.c`、`ecard_font_16.c`、`ecard_font_22.c`
-与 `ecard_font_48.c`。它们由 `main/CMakeLists.txt` 编译进 `main`，
-并在 `main/ecard_ui.c` 中由每个文本控件显式指定。
-
-| 项目 | 值 |
-| --- | --- |
-| 源字族 | Noto Sans CJK SC Regular，标签 `Sans2.004` |
-| 源文件 URL | `https://github.com/notofonts/noto-cjk/raw/Sans2.004/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf` |
-| 源文件 SHA-256 | `2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b` |
-| 许可 | SIL Open Font License 1.1，[`fonts/LICENSE-NotoSansCJK.txt`](fonts/LICENSE-NotoSansCJK.txt) |
-| 转换器 | `lv_font_conv` 1.5.3，`--bpp 2 --format lvgl --no-compress`（4 级灰阶，位图体积减半） |
-| 覆盖范围 | 可打印 ASCII + eCard 源码中的全部非 ASCII 字符 + 界面符号；12/16/22 px 额外包含 GB2312 一级字库，确保用户配置的学校、班级、姓名可正常显示 |
-| 编译后大小 | 约 1.0 MiB 字库数据，位于 Flash；应用 2.66 MB，双 OTA 槽位各 4.03 MB |
-
-在仓库根目录重新生成已提交的字库源码：
-
-```bash
-npm install --prefix /tmp/lvfont lv_font_conv@1.5.3
-python3 tools/generate_ecard_fonts.py \
-  --converter /tmp/lvfont/node_modules/.bin/lv_font_conv
-```
-
-脚本会把固定版本的 OTF 下载到 `fonts/.cache/`，校验 SHA-256，并在源字库
-缺少任一所需字形时失败。缓存的 OTF 不提交。修改界面文案后必须重新运行
-脚本与 `python3 tests/test_ecard_fonts.py`；`./tools/validate.sh --static`
-也会执行覆盖检查。生成清单之外的字符不受支持，将显示为 LVGL 缺字占位符。
-
 ## 图片（images）
 
 可复用的源图与生成的显示资产放在 `images/`。
@@ -55,16 +25,6 @@ python3 tools/generate_ecard_fonts.py \
 | [`images/readme-hardware-specs.png`](images/readme-hardware-specs.png) | 2172 × 724，PNG RGBA | 保留为可选技术参考图，不再用于首页主视觉。于 2026-09-17 使用内置图像生成工具为本仓库生成；已根据文档中的硬件能力契约核对图中的六项标签与参数。 |
 | [`images/logo-wordmark.png`](images/logo-wordmark.png) | 1648 × 336，PNG RGBA | 从仓库原始 `images/logo.png` 中精确裁切并去除背景的黑色字标；用于中英文项目 README 的浅色主题。 |
 | [`images/logo-wordmark-dark.png`](images/logo-wordmark-dark.png) | 1648 × 336，PNG RGBA | 提取字标的白色版本；README 使用 `<picture>` 在 GitHub 深色主题下显示。 |
-| [`images/ecard_portrait_source.jpg`](images/ecard_portrait_source.jpg) | 665 × 886，JPEG | 仅供 eCard 演示使用的合成半身照，不对应任何真实学生；量产前必须替换为学校授权的证件照。于 2026-11-06 为本仓库生成。 |
-| [`images/ecard_portrait.c`](images/ecard_portrait.c) | 130 × 184 与 54 × 78，RGB565 C 数组 | 由 `tools/generate_ecard_photo.py` 生成，圆角已烘焙为白色，编译进 `main` 并通过 `main/ecard_photo.h` 引用。请勿手工编辑。 |
-
-替换源图后，在仓库根目录重新生成证件照描述符：
-
-```bash
-python3 tools/generate_ecard_photo.py
-```
-
-脚本会把预览裁切图写入已被忽略的 `images/.ecard_portrait_preview/` 目录。
 
 - 使用描述性命名，并记录尺寸、像素格式、转换步骤与目标路径。
 - 优先采用适合 240 × 320 RGB565 显示的格式，并纳入 Flash 与内部 RAM 考量。
@@ -79,20 +39,6 @@ python3 tools/generate_ecard_photo.py
 - 与当前 BSP 音频路径匹配时优先采用 16 kHz、16 位单声道 PCM。
 - 嵌入音频前评估 Flash 与内部 RAM 成本；长录音应流式或分块。
 - 无再分发许可不提交媒体文件。
-
-### eCard 演示语音
-
-[`sounds/ecard_demo_voice.c`](sounds/ecard_demo_voice.c) 是网络留言暂无音频负载时
-使用的 7.3 秒演示留言：4-bit IMA-ADPCM、16 kHz 单声道，解码初值为 0/0，约占 59 KB Flash。
-
-| 项目 | 内容 |
-| --- | --- |
-| 文案 | `远豪，妈妈给你留了一条语音，放学记得早点回家，写完作业再玩哦。` |
-| 音色 | macOS `say -v Tingting`（zh_CN）合成占位，不是真人录音 |
-| 生成 | `python3 tools/generate_ecard_demo_voice.py`（需要 macOS `say`/`afconvert`） |
-| 目标 | 由 `main/CMakeLists.txt` 编入 `main`，回放由 `main/ecard_voice.c` 处理 |
-
-该片段仅作演示，接入小智 TTS 后应替换为真实语音。
 
 ## 电池参数（battery）
 
