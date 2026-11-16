@@ -9,7 +9,9 @@
 
 static const char *TAG = "bsp_lvgl";
 
-#define BSP_LVGL_DRAW_BUFFER_LINES 40
+// 40 行需要 19 KB 堆；eCard 上小智 TLS/Opus 堆栈紧缺，
+// 降到 16 行（7.68 KB）比 20 行再省出 1.92 KB，240x320 的界面刷新仍然流畅。
+#define BSP_LVGL_DRAW_BUFFER_LINES 16
 
 static lv_display_t *s_disp;
 static bool s_port_initialized;
@@ -115,7 +117,7 @@ lv_display_t *bsp_lvgl_init(void) {
 
     // Mask the final RGB565 flush instead of using root-screen clip_corner.
     // Full-screen rounded clipping creates an ARGB layer that does not fit the
-    // 24 KB LVGL pool reliably on this no-PSRAM target.
+    // 48 KB LVGL pool on this no-PSRAM target.
     s_disp = disp;
     lvgl_port_unlock();
 

@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Passport 小程序模拟器 · 零留存中转台</title>
+<style>
+  :root {
+    --bg: #eef4fb; --card: #fff; --ink: #0f2744; --muted: #5b7089;
+    --line: #dce5f0; --blue: #2563eb; --green: #059669; --red: #dc2626; --amber: #d97706;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; background: var(--bg); color: var(--ink); }
+  header { background: #0b2240; color: #fff; padding: 14px 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+  header h1 { margin: 0; font-size: 18px; }
+  .pill { background: #163761; border: 1px solid #2b548a; border-radius: 999px; padding: 4px 12px; font-size: 12px; color: #bfd5ec; }
+  .pill.ok { border-color: #10b981; color: #6ee7b7; }
+  main { max-width: 1180px; margin: 18px auto; padding: 0 16px; display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; box-shadow: 0 4px 14px rgba(15,39,68,.05); }
+  .card h2 { margin: 0 0 12px; font-size: 15px; display: flex; justify-content: space-between; align-items: center; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
+  input, select, textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; color: var(--ink); background: #fff; }
+  button { border: 0; border-radius: 8px; padding: 9px 14px; font-size: 13px; font-weight: 600; cursor: pointer; background: var(--blue); color: #fff; }
+  button.sec { background: #e8f0fe; color: var(--blue); }
+  button.warn { background: #fef3c7; color: #b45309; }
+  button.danger { background: #fee2e2; color: var(--red); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  .metrics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .metric { background: #f8fafc; border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+  .metric .v { font-size: 20px; font-weight: 700; color: var(--blue); }
+  .metric .k { font-size: 11px; color: var(--muted); }
+  .item { border: 1px solid var(--line); border-radius: 10px; padding: 10px; margin-top: 8px; background: #fbfdff; }
+  .item .meta { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; gap: 6px; }
+  .item .txt { margin: 6px 0; font-size: 13px; }
+  .log { max-height: 220px; overflow: auto; font-family: ui-monospace, monospace; font-size: 11px; background: #0b2240; color: #dbeafe; padding: 10px; border-radius: 10px; }
+  .log div { margin-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,.07); padding-bottom: 3px; }
+  .badge { display: inline-block; padding: 2px 7px; border-radius: 6px; font-size: 11px; font-weight: 600; background: #e8f0fe; color: var(--blue); }
+  .badge.teacher { background: #f3e8ff; color: #7c3aed; }
+  .badge.admin { background: #ccfbf1; color: #0f766e; }
+  .badge.sos { background: #fee2e2; color: var(--red); }
+  #sendStatus { font-size: 12px; margin-top: 8px; min-height: 18px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>AI Passport 微信小程序模拟器 · 零留存微型中转台</h1>
+  <div class="row" style="margin:0">
+    <span id="retentionPill" class="pill ok">零留存队列: 待检测</span>
+    <span id="devicePill" class="pill">未发现设备</span>
+  </div>
+</header>
+
+<main>
+  <!-- 1. 发送留言 -->
+  <section class="card">
+    <h2>发送语音留言到学生证 <span class="badge">8kHz ADPCM</span></h2>
+    <label>目标设备 (device_id)</label>
+    <input id="targetDevice" value="auto" placeholder="auto（自动匹配最近在线设备）">
+
+    <label>发送身份预设（一键填充测试）</label>
+    <div class="row" style="margin-top:4px">
+      <button type="button" class="sec" onclick="fillPreset('primary_parent')">主家长</button>
+      <button type="button" class="sec" onclick="fillPreset('family')">绑定家人(爸爸)</button>
+      <button type="button" class="sec" onclick="fillPreset('teacher')">本班老师</button>
+      <button type="button" class="sec" onclick="fillPreset('school_admin')">学校管理者</button>
+      <button type="button" class="danger" onclick="fillPreset('stranger')">未授权陌生人</button>
+    </div>
+
+    <label>角色 / 称呼 / 手机号</label>
+    <div class="row" style="margin-top:0">
+      <select id="senderRole" style="flex:1">
+        <option value="primary_parent">primary_parent（主家长）</option>
+        <option value="family">family（家庭成员）</option>
+        <option value="teacher">teacher（本班老师）</option>
+        <option value="school_admin">school_admin（学校管理者）</option>
+        <option value="unknown">unknown（未授权）</option>
+      </select>
+      <input id="senderName" value="妈妈" style="flex:1" placeholder="称呼">
+      <input id="senderPhone" value="13800138000" style="flex:1.2" placeholder="手机号">
+    </div>
+
+    <div class="row" style="margin-top:6px">
+      <input id="senderSchool" placeholder="学校（老师/校管必填）" style="flex:1">
+      <input id="senderClass" placeholder="班级（老师必填）" style="flex:1">
+    </div>
+
+    <label>同步上屏转写文字 (text)</label>
+    <textarea id="msgText" rows="2">放学记得带水杯，妈妈五点在校门口等你。</textarea>
+
+    <div class="row">
+      <button id="recBtn" type="button" class="warn" onclick="toggleBrowserMic()">按住/点击麦克风录音</button>
+      <button type="button" onclick="sendVoice(false)">发送留言</button>
+      <button type="button" class="danger" title="跳过服务端拦截，用于验证设备端 ACL 兜底拦截" onclick="sendVoice(true)">绕过服务端测端侧ACL</button>
+    </div>
+    <div id="sendStatus"></div>
+  </section>
+
+  <!-- 2. 权限白名单 ACL -->
+  <section class="card">
+    <h2>学生证发送权限白名单 (ACL) <button class="sec" onclick="saveAcl()">下发保存</button></h2>
+    <label>主家长手机号（初始化绑定）</label>
+    <input id="aclPrimary" value="13800138000">
+    <div class="row" style="margin-top:6px">
+      <div style="flex:1"><label>学生所在学校</label><input id="aclSchool" value="第一实验小学"></div>
+      <div style="flex:1"><label>学生所在班级</label><input id="aclClass" value="三年级二班"></div>
+    </div>
+    <label>已绑定家庭成员 JSON（[{"phone":"...","label":"爸爸"}]）</label>
+    <textarea id="aclFamily" rows="2">[{"phone":"13800138001","label":"爸爸"}]</textarea>
+    <label>匹配本班老师 JSON（school + class_name）</label>
+    <textarea id="aclTeachers" rows="2">[{"id":"T001","name":"李老师","phone":"13900001111","school":"第一实验小学","class_name":"三年级二班"}]</textarea>
+    <label>匹配本校管理者 JSON（school）</label>
+    <textarea id="aclAdmins" rows="2">[{"id":"A001","name":"陈主任","phone":"13900002222","school":"第一实验小学"}]</textarea>
+  </section>
+
+  <!-- 3. 零留存状态 & 学生端上传收件箱 -->
+  <section class="card">
+    <h2>服务器零留存监控 &amp; 学生录音收件箱</h2>
+    <div class="metrics">
+      <div class="metric"><div class="v" id="mToDev">0 条 / 0 B</div><div class="k">待设备拉取暂存（ACK即删）</div></div>
+      <div class="metric"><div class="v" id="mToCli">0 条 / 0 B</div><div class="k">待家长确认暂存（ACK即删）</div></div>
+    </div>
+    <h2 style="margin-top:14px">来自学生证的语音留言</h2>
+    <div id="inboxList"><div class="item">暂无待收听的学生留言</div></div>
+
+    <h2 style="margin-top:14px">紧急求助 SOS</h2>
+    <div id="sosList"><div class="item">暂无 SOS 告警</div></div>
+  </section>
+
+  <!-- 4. 在线设备 & 审计日志 -->
+  <section class="card" style="grid-column: 1 / -1;">
+    <h2>在线设备与中转审计日志（实时）</h2>
+    <div id="devicesBox" style="margin-bottom:10px"></div>
+    <div id="auditLog" class="log"></div>
+  </section>
+</main>
+
+<script>
+let recordedWavB64 = null;
+let mediaStream = null, audioCtx = null, procNode = null, pcmChunks = [];
+
+function fillPreset(kind) {
+  const school = document.getElementById('aclSchool').value.trim();
+  const klass = document.getElementById('aclClass').value.trim();
+  const pPhone = document.getElementById('aclPrimary').value.trim();
+  if (kind === 'primary_parent') {
+    senderRole.value = 'primary_parent'; senderName.value = '妈妈';
+    senderPhone.value = pPhone; senderSchool.value = ''; senderClass.value = '';
+    msgText.value = '妈妈今天五点准时在南门接你。';
+  } else if (kind === 'family') {
+    senderRole.value = 'family'; senderName.value = '爸爸';
+    senderPhone.value = '13800138001'; senderSchool.value = ''; senderClass.value = '';
+    msgText.value = '爸爸下班顺路去接你，别乱跑。';
+  } else if (kind === 'teacher') {
+    senderRole.value = 'teacher'; senderName.value = '李老师';
+    senderPhone.value = '13900001111'; senderSchool.value = school; senderClass.value = klass;
+    msgText.value = '今天数学作业是练习册第12页，记得带回家。';
+  } else if (kind === 'school_admin') {
+    senderRole.value = 'school_admin'; senderName.value = '陈主任';
+    senderPhone.value = '13900002222'; senderSchool.value = school; senderClass.value = '';
+    msgText.value = '全校通知：明天上午九点在操场举行升旗仪式。';
+  } else {
+    senderRole.value = 'family'; senderName.value = '陌生来电';
+    senderPhone.value = '19999999999'; senderSchool.value = '其它学校'; senderClass.value = '一年级';
+    msgText.value = '未授权测试消息（应当被拦截）';
+  }
+}
+
+async function saveAcl() {
+  const devId = targetDevice.value.trim() || 'auto';
+  const payload = {
+    device_id: devId,
+    acl: {
+      primary_phone: aclPrimary.value.trim(),
+      student_school: aclSchool.value.trim(),
+      student_class: aclClass.value.trim(),
+      family: JSON.parse(aclFamily.value || '[]'),
+      teachers: JSON.parse(aclTeachers.value || '[]'),
+      admins: JSON.parse(aclAdmins.value || '[]'),
+    }
+  };
+  const r = await fetch('/api/v1/client/acl', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+  const d = await r.json();
+  sendStatus.textContent = d.ok ? `白名单已更新 (设备: ${d.device_id})，设备下次轮询即刻生效` : `失败: ${d.error}`;
+}
+
+async function sendVoice(bypassAcl) {
+  const payload = {
+    device_id: targetDevice.value.trim() || 'auto',
+    sender_role: senderRole.value,
+    sender_name: senderName.value.trim(),
+    sender_phone: senderPhone.value.trim(),
+    sender_school: senderSchool.value.trim(),
+    sender_class: senderClass.value.trim(),
+    text: msgText.value.trim(),
+    duration_sec: 3,
+    bypass_server_acl: !!bypassAcl
+  };
+  if (recordedWavB64) payload.wav_base64 = recordedWavB64;
+  const r = await fetch('/api/v1/client/send', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+  const d = await r.json();
+  recordedWavB64 = null;
+  recBtn.textContent = '按住/点击麦克风录音';
+  if (r.ok) {
+    sendStatus.style.color = '#059669';
+    sendStatus.textContent = `已入中转队列 (${d.remote_id}, ${d.audio_bytes}B)，等待设备拉取并 ACK 后删除`;
+  } else {
+    sendStatus.style.color = '#dc2626';
+    sendStatus.textContent = `被拒绝 HTTP ${r.status}: ${d.reason || d.error}`;
+  }
+  refreshState();
+}
+
+async function ackClientMsg(rid) {
+  await fetch('/api/v1/client/ack', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({remote_ids:[rid]})});
+  refreshState();
+}
+
+function encodeWav16(samples, sampleRate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const v = new DataView(buf);
+  const ws = (o, s) => { for (let i=0;i<s.length;i++) v.setUint8(o+i, s.charCodeAt(i)); };
+  ws(0,'RIFF'); v.setUint32(4, 36 + samples.length*2, true); ws(8,'WAVE');
+  ws(12,'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate*2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  ws(36,'data'); v.setUint32(40, samples.length*2, true);
+  for (let i=0;i<samples.length;i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i*2, s < 0 ? s*0x8000 : s*0x7fff, true);
+  }
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  for (let i=0;i<bytes.length;i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+async function toggleBrowserMic() {
+  if (mediaStream) {
+    procNode.disconnect(); mediaStream.getTracks().forEach(t=>t.stop());
+    const len = pcmChunks.reduce((a,b)=>a+b.length, 0);
+    const merged = new Float32Array(len);
+    let off = 0; for (const c of pcmChunks) { merged.set(c, off); off += c.length; }
+    recordedWavB64 = encodeWav16(merged, audioCtx.sampleRate);
+    await audioCtx.close();
+    mediaStream = null; audioCtx = null; procNode = null; pcmChunks = [];
+    recBtn.textContent = '已录好语音（点击发送即可）';
+    return;
+  }
+  mediaStream = await navigator.mediaDevices.getUserMedia({audio:true});
+  audioCtx = new AudioContext();
+  const src = audioCtx.createMediaStreamSource(mediaStream);
+  procNode = audioCtx.createScriptProcessor(4096, 1, 1);
+  pcmChunks = [];
+  procNode.onaudioprocess = e => pcmChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  src.connect(procNode); procNode.connect(audioCtx.destination);
+  recBtn.textContent = '录音中… 点击结束';
+}
+
+let firstLoad = true;
+async function refreshState() {
+  const r = await fetch('/api/v1/client/state');
+  const d = await r.json();
+  const q = d.ephemeral_queues;
+  mToDev.textContent = `${q.to_device_count} 条 / ${q.to_device_bytes} B`;
+  mToCli.textContent = `${q.to_client_count} 条 / ${q.to_client_bytes} B`;
+  const zero = q.to_device_count === 0 && q.to_client_count === 0;
+  retentionPill.textContent = zero ? '零留存队列: 0 B（已清空）' : `中转暂存中: ${q.to_device_bytes + q.to_client_bytes} B`;
+  retentionPill.className = 'pill ' + (zero ? 'ok' : '');
+
+  if (d.devices.length > 0) {
+    const dev = d.devices[0];
+    devicePill.textContent = `设备在线: ${dev.student_name || dev.device_id}`;
+    devicePill.className = 'pill ok';
+    if (firstLoad && dev.primary_phone) {
+      aclPrimary.value = dev.primary_phone;
+      aclSchool.value = dev.school || aclSchool.value;
+      aclClass.value = dev.class_name || aclClass.value;
+      firstLoad = false;
+    }
+    devicesBox.innerHTML = d.devices.map(x =>
+      `<span class="badge">${x.device_id}</span> <b>${x.student_name}</b> (${x.school} ${x.class_name} · 主家长 ${x.primary_phone})`
+    ).join('<br>');
+  } else {
+    devicePill.textContent = '等待设备轮询…';
+    devicesBox.innerHTML = '<span style="color:#64748b;font-size:12px">暂无设备轮询，设备连上同一局域网后会自动发现本中转站。</span>';
+  }
+
+  inboxList.innerHTML = d.inbox_from_device.length ? d.inbox_from_device.map(m => `
+    <div class="item">
+      <div class="meta"><span><b>${m.student_name}</b> (${m.duration_sec}s · ${m.asr_engine})</span><span>${m.remote_id}</span></div>
+      <div class="txt">${m.text}</div>
+      <div class="row" style="margin-top:6px">
+        <audio controls preload="none" src="/api/v1/client/audio/${m.remote_id}" style="height:30px;flex:1"></audio>
+        <button class="sec" onclick="ackClientMsg('${m.remote_id}')">已收听(ACK并销毁)</button>
+      </div>
+    </div>
+  `).join('') : '<div class="item">暂无待收听的学生留言（服务端 0 留存）</div>';
+
+  sosList.innerHTML = d.sos_alerts.length ? d.sos_alerts.map(s => `
+    <div class="item"><span class="badge sos">SOS</span> <b>${s.student_name}</b> (${s.student_id}) · ${s.location}</div>
+  `).join('') : '<div class="item">暂无 SOS 告警</div>';
+
+  auditLog.innerHTML = d.audit_log.map(l => `<div>[${new Date(l.time*1000).toLocaleTimeString()}] <b>${l.event}</b> ${l.detail}</div>`).join('');
+}
+setInterval(refreshState, 2000);
+refreshState();
+</script>
+</body>
+</html>
