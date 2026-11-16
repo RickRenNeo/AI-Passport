@@ -17,6 +17,7 @@
 #include "freertos/task.h"
 
 #include "ecard_app.h"
+#include "ecard_messages.h"
 #include "ecard_netlink.h"
 #include "ecard_portal.h"
 #include "ecard_setup.h"
@@ -36,6 +37,7 @@ typedef struct {
     bsp_btn_t btn;
     bsp_btn_ev_t event;
     int64_t t_us; /* 入队时刻：用来定位按键到界面响应的延迟 */
+    bool record_full;
 } input_event_t;
 
 static QueueHandle_t s_input_queue = NULL;
@@ -46,6 +48,17 @@ static bool s_screen_dimmed = false;
 
 #define KEY_GUARD_MAX_US (10LL * 1000 * 1000)
 static key_guard_t s_key_guard;
+
+static void on_record_full(void) {
+    if (!s_input_queue) return;
+    const input_event_t ev = {
+        .btn = BSP_BTN_OK,
+        .event = BSP_BTN_CLICK,
+        .t_us = esp_timer_get_time(),
+        .record_full = true,
+    };
+    (void)xQueueSend(s_input_queue, &ev, 0);
+}
 
 static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
     (void)user;
@@ -61,6 +74,7 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
         .btn = btn,
         .event = ev,
         .t_us = esp_timer_get_time(),
+        .record_full = false,
     };
     (void)xQueueSend(s_input_queue, &input, 0);
 }
@@ -73,13 +87,37 @@ static void input_task(void *arg) {
             const int64_t dequeue_us = esp_timer_get_time();
             const bool locked = bsp_lvgl_lock(500);
             const int64_t locked_us = esp_timer_get_time();
+            bool saving_clip = false;
+            uint8_t save_dur = 0;
+            size_t save_bytes = 0;
             if (locked) {
                 if (s_screen_dimmed) {
                     s_screen_dimmed = false;
                     bsp_display_backlight(100);
                 }
-                ecard_app_handle_key(input.btn, input.event);
+                const bool finish_by_full = input.record_full &&
+                    ecard_app_get_state() == ECARD_APP_STATE_RECORDING &&
+                    !ecard_app_ai_listening();
+                const bool finish_by_key = !input.record_full &&
+                    input.btn == BSP_BTN_OK && input.event == BSP_BTN_CLICK &&
+                    ecard_app_get_state() == ECARD_APP_STATE_RECORDING &&
+                    !ecard_app_ai_listening();
+                if (finish_by_full || finish_by_key) {
+                    saving_clip = ecard_app_begin_save_recording(&save_dur, &save_bytes);
+                } else if (!input.record_full) {
+                    ecard_app_handle_key(input.btn, input.event);
+                }
                 bsp_lvgl_unlock();
+            }
+            if (saving_clip) {
+                // SPIFFS 写盘耗时且触发 Flash 擦写，必须在 LVGL 锁外执行，避免阻塞屏幕与音频任务。
+                const uint32_t msg_id = ecard_app_persist_recorded_clip(save_dur);
+                if (bsp_lvgl_lock(500)) {
+                    ecard_app_start_recorded_playback(msg_id, save_dur);
+                    bsp_lvgl_unlock();
+                } else {
+                    ecard_voice_clip_release();
+                }
             }
             const int64_t done_us = esp_timer_get_time();
             const int64_t queue_ms = (dequeue_us - input.t_us) / 1000;
@@ -124,6 +162,9 @@ static void tick_task(void *arg) {
         uint8_t minute = sim_min;
         if (ecard_time_is_synced()) {
             ecard_time_now(&hour, &minute, NULL);
+            if (!ecard_messages_epoch_synced()) {
+                ecard_messages_sync_epoch(ecard_time_epoch_sec());
+            }
         }
 
         if (bsp_lvgl_lock(200)) {
@@ -282,6 +323,9 @@ void app_main(void) {
     // 首次配置存储：NVS 中的身份与 Wi-Fi
     ecard_setup_init();
 
+    // 挂载 1 MB SPIFFS 语音留言分区（必须在 ecard_app_init 之前，否则留言会回退成内存演示数据）
+    (void)ecard_messages_mount_spiffs();
+
     // 初始化 eCard 核心应用引擎与 UI
     ecard_app_init();
     // 必须在 ecard_app_init() 之后应用：该函数会把档案重置为出厂默认值，
@@ -297,6 +341,7 @@ void app_main(void) {
     if (!ecard_netlink_init()) {
         ESP_LOGW(TAG, "Wi-Fi 初始化失败，仅保留离线功能");
     }
+    ecard_network_start_sync_worker();
     if (!ecard_setup_is_provisioned()) {
         (void)ecard_portal_start();
     }
@@ -311,8 +356,9 @@ void app_main(void) {
 
     s_input_queue = xQueueCreate(INPUT_QUEUE_DEPTH, sizeof(input_event_t));
     if (s_input_queue) {
-        // 编码器/解码器开关已移入 xz_audio 独立任务；按键任务只处理 UI 与队列投递，6 KB 足够。
-        xTaskCreate(input_task, "ecard_input", 6144, NULL, 5, &s_input_task);
+        ecard_app_set_record_full_cb(on_record_full);
+        // 编码器/解码器开关已移入 xz_audio 独立任务；按键任务含录音落盘与索引保存，取 7 KB 栈。
+        xTaskCreate(input_task, "ecard_input", 7168, NULL, 5, &s_input_task);
         xTaskCreate(tick_task, "ecard_tick", 3072, NULL, 3, &s_tick_task);
         xTaskCreate(audio_task, "ecard_audio", 4096, NULL, 4, &s_audio_task);
     }

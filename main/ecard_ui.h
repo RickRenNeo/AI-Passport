@@ -1,6 +1,7 @@
 #ifndef ECARD_UI_H
 #define ECARD_UI_H
 
+#include "ecard_messages.h"
 #include "ecard_profile.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -193,6 +194,16 @@ void ecard_ui_show_ai_listen_modal(uint8_t remaining_sec, uint8_t audio_amplitud
  * @brief 修改当前页面底部提示；页面没有提示条时忽略。
  */
 void ecard_ui_set_hint(const char *text);
+
+/**
+ * @brief 设置当前播放弹窗展示的留言元数据（发送方、角色与语音转写文本）。
+ */
+void ecard_ui_set_playing_message(const ecard_message_t *msg);
+
+/**
+ * @brief 获取当前正在播放弹窗绑定的留言元数据（无数据时返回 NULL）。
+ */
+const ecard_message_t *ecard_ui_playing_message(void);
 
 /**
  * @brief 显示或更新播放界面。

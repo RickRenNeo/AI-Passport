@@ -31,7 +31,7 @@ idf_component_register(
          "ecard_network.c"
          "ecard_app.c"
     INCLUDE_DIRS "."
-    REQUIRES bsp bt esp_event esp_hw_support esp_netif esp_timer esp_wifi nvs_flash esp_http_server esp_http_client json nvs_flash esp_app_format
+    REQUIRES bsp bt esp_event esp_hw_support esp_netif esp_timer esp_wifi nvs_flash esp_http_server esp_http_client json esp_app_format spiffs
 )
 
 # Generated with tools/generate_ecard_fonts.py. Keep the command and source

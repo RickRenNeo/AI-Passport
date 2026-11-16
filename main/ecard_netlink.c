@@ -1,4 +1,5 @@
 #include "ecard_netlink.h"
+#include "ecard_network.h"
 #include "ecard_portal.h"
 #include "ecard_setup.h"
 #include "ecard_time.h"
@@ -90,6 +91,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
             s_portal_open = false;
         }
         ecard_time_start_sync();
+        ecard_network_request_sync();
         ecard_xiaozhi_start();
     }
 }

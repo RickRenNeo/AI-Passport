@@ -39,11 +39,19 @@ bool ecard_setup_is_provisioned(void);
 /** 当前配置（只读）。 */
 const ecard_setup_t *ecard_setup_get(void);
 
+#define ECARD_RELAY_URL_MAX 128
+
 /** 保存身份信息并做完整校验；成功返回 true。 */
 bool ecard_setup_save_identity(const ecard_setup_t *identity);
 
 /** 保存 Wi-Fi 凭据（SSID 非空、密码 8..64 位）。 */
 bool ecard_setup_save_wifi(const char *ssid, const char *password);
+
+/** 获取已保存的中转服务基地址（未配置时返回空串）。 */
+const char *ecard_setup_get_relay_url(void);
+
+/** 保存中转服务基地址（须以 http:// 或 https:// 开头，传空串清空）。 */
+bool ecard_setup_save_relay_url(const char *url);
 
 /** 清除全部配置（设备重置）。 */
 bool ecard_setup_clear(void);

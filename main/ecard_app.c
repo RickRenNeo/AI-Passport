@@ -61,6 +61,8 @@ static uint16_t s_ai_listen_ms = 0;
 static uint16_t s_net_retry_ms = 0;
 // 录音浮层按 100ms 刷新一次，避免 20ms 音频块把 LVGL 刷屏
 static uint8_t s_rec_ui_div = 0;
+static bool s_rec_finish_pending = false;
+static ecard_app_record_full_cb_t s_record_full_cb = NULL;
 
 #define ECARD_REC_UI_DIV 5
 #define ECARD_NET_RETRY_TIMEOUT_MS 10000
@@ -79,6 +81,7 @@ static void sync_unread_messages(void) {
     memset(&msg, 0, sizeof(msg));
     msg.id = message_id;
     msg.direction = ECARD_MESSAGE_RECEIVED;
+    msg.sender_role = ECARD_SENDER_PRIMARY_PARENT;
     msg.duration_sec = dur;
     msg.unread = true;
     snprintf(msg.peer, sizeof(msg.peer), "%s", sender[0] ? sender : "家长");
@@ -95,15 +98,23 @@ static void start_playback(const ecard_message_t *msg) {
     s_play_message_id = msg->id;
     s_play_clears_unread = (msg->direction == ECARD_MESSAGE_RECEIVED && msg->unread);
 
-    // 只有“刚录的那条”留言能用真实录音；网络下发的留言没有音频负载，
-    // 用内置演示语音顶上，避免“无声倒计时”。
-    s_play_has_audio = (msg->id == s_clip_message_id) && ecard_voice_playback_start();
+    s_play_has_audio = false;
+    if (msg->id != 0 && msg->id == s_clip_message_id && ecard_voice_has_clip()) {
+        s_play_has_audio = ecard_voice_playback_start();
+    }
+    if (!s_play_has_audio && msg->has_audio) {
+        char audio_path[ECARD_MESSAGES_PATH_MAX];
+        if (ecard_messages_audio_path(msg->id, audio_path, sizeof(audio_path))) {
+            s_play_has_audio = ecard_voice_playback_start_file(audio_path, msg->audio_is_8k);
+        }
+    }
     if (!s_play_has_audio) {
         s_play_has_audio = ecard_voice_playback_start_demo();
         if (s_play_has_audio) {
             s_play_total_sec = ecard_voice_demo_duration_sec();
         }
     }
+    ecard_ui_set_playing_message(msg);
     s_app_state = ECARD_APP_STATE_PLAYING;
     ecard_ui_show_playing_modal(0, s_play_total_sec);
 }
@@ -295,45 +306,132 @@ bool ecard_app_ai_listening(void) {
     return s_ai_listen;
 }
 
+void ecard_app_set_record_full_cb(ecard_app_record_full_cb_t cb) {
+    s_record_full_cb = cb;
+}
+
 static void start_recording(void) {
     if (!ecard_voice_start_recording()) return;
     uint8_t max_sec = (uint8_t)(ecard_voice_buffer_capacity() / ECARD_VOICE_BYTES_PER_SEC);
     if (max_sec == 0) max_sec = 1;
     if (max_sec > ECARD_VOICE_RECORD_SEC) max_sec = ECARD_VOICE_RECORD_SEC;
     s_rec_ui_div = 0;
+    s_rec_finish_pending = false;
     s_app_state = ECARD_APP_STATE_RECORDING;
     ecard_ui_show_recording_modal(max_sec, 0);
 }
 
-static void finish_recording(void) {
+bool ecard_app_begin_save_recording(uint8_t *out_duration_sec, size_t *out_bytes) {
+    if (s_app_state != ECARD_APP_STATE_RECORDING || s_ai_listen) {
+        return false;
+    }
+    s_rec_finish_pending = false;
     const uint8_t *adpcm_data = NULL;
     size_t len = 0;
     uint8_t dur = 0;
-    if (ecard_voice_stop_recording(&adpcm_data, &len, &dur)) {
-        ecard_network_upload_voice(adpcm_data, len, dur);
-        // 发出的留言同样进入列表，方便之后回看与重听。
-        ecard_message_t sent;
-        memset(&sent, 0, sizeof(sent));
-        sent.direction = ECARD_MESSAGE_SENT;
-        sent.duration_sec = dur;
-        snprintf(sent.peer, sizeof(sent.peer), "%s", "妈妈");
-        s_clip_message_id = ecard_messages_add(&sent, 0);
+    if (!ecard_voice_stop_recording(&adpcm_data, &len, &dur)) {
+        ecard_voice_clip_release();
+        ecard_ui_hide_modal();
+        s_app_state = ECARD_APP_STATE_IDLE;
+        return false;
+    }
+    // 立刻切回 IDLE 停止继续采音，随后退出 LVGL 锁再执行 SPIFFS 写盘。
+    s_app_state = ECARD_APP_STATE_IDLE;
+    if (out_duration_sec) *out_duration_sec = dur;
+    if (out_bytes) *out_bytes = len;
+    return true;
+}
 
-        // 上传后立即本地试听，确认麦克风真的录到了声音。
-        s_play_progress_sec = 0;
-        s_play_total_sec = dur ? dur : 1;
-        s_play_has_audio = ecard_voice_playback_start();
-        s_play_clears_unread = false;
+uint32_t ecard_app_persist_recorded_clip(uint8_t duration_sec) {
+    ecard_message_t sent;
+    memset(&sent, 0, sizeof(sent));
+    sent.direction = ECARD_MESSAGE_SENT;
+    sent.sender_role = ECARD_SENDER_STUDENT;
+    sent.duration_sec = duration_sec;
+    sent.audio_is_8k = (ECARD_VOICE_STORE_RATE == 8000);
+    sent.pending_upload = true;
+    const ecard_setup_t *cfg = ecard_setup_get();
+    if (cfg && cfg->phone[0]) {
+        snprintf(sent.sender_phone, sizeof(sent.sender_phone), "%s", cfg->phone);
+    }
+    snprintf(sent.peer, sizeof(sent.peer), "%s", "家长");
+
+    uint32_t saved_id = 0;
+    char rec_tmp[80];
+    size_t saved_bytes = 0;
+    if (ecard_messages_rec_temp_audio_path(rec_tmp, sizeof(rec_tmp))) {
+        if (ecard_voice_save_to_file(rec_tmp, &saved_bytes) && saved_bytes > 0) {
+            saved_id = ecard_messages_adopt_audio_file(&sent, 0, rec_tmp, saved_bytes);
+        }
+        if (saved_id != 0) {
+            // 已落盘至 /spiffs/msg_<id>.adp：立刻归还借用的静态区和堆分段，
+            // 留足 ~40 KB 堆空间给文件试听与 HTTP 上传。
+            ecard_voice_clip_release();
+            ecard_network_request_upload(saved_id);
+        }
+    } else {
+        // 未挂载持久化目录（如宿主单测）：保留内存录音以便随后试听。
+        saved_id = ecard_messages_add(&sent, 0);
+        if (saved_id != 0) {
+            ecard_network_request_upload(saved_id);
+        }
+    }
+    return saved_id;
+}
+
+void ecard_app_start_recorded_playback(uint32_t local_msg_id, uint8_t duration_sec) {
+    s_clip_message_id = local_msg_id;
+    s_play_progress_sec = 0;
+    s_play_total_sec = duration_sec ? duration_sec : 1;
+    s_play_clears_unread = false;
+    s_play_message_id = local_msg_id;
+    s_play_has_audio = false;
+
+    ecard_message_t snapshot;
+    if (local_msg_id != 0 && ecard_messages_copy_by_id(local_msg_id, &snapshot)) {
+        if (snapshot.has_audio) {
+            char audio_path[ECARD_MESSAGES_PATH_MAX];
+            if (ecard_messages_audio_path(local_msg_id, audio_path, sizeof(audio_path))) {
+                s_play_has_audio = ecard_voice_playback_start_file(audio_path, snapshot.audio_is_8k);
+            }
+        } else if (ecard_voice_has_clip()) {
+            s_play_has_audio = ecard_voice_playback_start();
+        }
+        ecard_ui_set_playing_message(&snapshot);
+    } else {
+        if (ecard_voice_has_clip()) {
+            s_play_has_audio = ecard_voice_playback_start();
+        }
+        memset(&snapshot, 0, sizeof(snapshot));
+        snapshot.direction = ECARD_MESSAGE_SENT;
+        snapshot.sender_role = ECARD_SENDER_STUDENT;
+        snapshot.duration_sec = duration_sec;
+        snprintf(snapshot.peer, sizeof(snapshot.peer), "%s", "家长");
+        ecard_ui_set_playing_message(&snapshot);
+    }
+
+    if (s_play_has_audio) {
         s_app_state = ECARD_APP_STATE_PLAYING;
         ecard_ui_show_playing_modal(0, s_play_total_sec);
+    } else {
+        ecard_voice_clip_release();
+        ecard_ui_hide_modal();
+        s_app_state = ECARD_APP_STATE_IDLE;
+    }
+}
+
+static void finish_recording(void) {
+    uint8_t dur = 0;
+    size_t len = 0;
+    if (!ecard_app_begin_save_recording(&dur, &len)) {
         return;
     }
-    ecard_voice_clip_release();
-    ecard_ui_hide_modal();
-    s_app_state = ECARD_APP_STATE_IDLE;
+    const uint32_t saved_id = ecard_app_persist_recorded_clip(dur);
+    ecard_app_start_recorded_playback(saved_id, dur);
 }
 
 static void begin_sos_pending(void) {
+    s_rec_finish_pending = false;
     if (s_app_state == ECARD_APP_STATE_RECORDING) {
         const uint8_t *adpcm = NULL;
         size_t len = 0;
@@ -559,9 +657,9 @@ static void handle_idle_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
     if (btn == BSP_BTN_OK && ev == BSP_BTN_CLICK) {
         switch (page) {
         case ECARD_UI_PAGE_HOME: {
-            const ecard_message_t *latest = ecard_messages_latest_unread();
-            if (latest) {
-                start_playback(latest);
+            ecard_message_t latest;
+            if (ecard_messages_copy_latest_unread(&latest)) {
+                start_playback(&latest);
             } else {
                 ecard_ui_show_page(ECARD_UI_PAGE_MENU);
             }
@@ -598,10 +696,9 @@ static void handle_idle_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
             }
             break;
         case ECARD_UI_PAGE_MESSAGES: {
-            const ecard_message_t *selected =
-                ecard_messages_recent((int)ecard_ui_messages_selection());
-            if (selected) {
-                start_playback(selected);
+            ecard_message_t selected;
+            if (ecard_messages_copy_recent((int)ecard_ui_messages_selection(), &selected)) {
+                start_playback(&selected);
             } else {
                 ecard_ui_show_page(ECARD_UI_PAGE_MENU);
             }
@@ -679,6 +776,7 @@ void ecard_app_init(void) {
     s_menu_press_moved = false;
     s_ai_listen_ms = 0;
     s_rec_ui_div = 0;
+    s_rec_finish_pending = false;
 }
 
 void ecard_app_handle_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
@@ -702,6 +800,7 @@ void ecard_app_handle_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
     if (current_page == ECARD_UI_PAGE_RESET) {
         if (btn == BSP_BTN_OK && ev == BSP_BTN_CLICK) {
             ecard_setup_clear();
+            ecard_messages_clear_all();
 #if defined(ESP_PLATFORM)
             esp_restart();
 #endif
@@ -762,6 +861,17 @@ void ecard_app_handle_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
 void ecard_app_tick(uint8_t current_hour, uint8_t current_minute, uint32_t delta_ms) {
     // 留言列表按“距现在多久”排序与过滤，每秒推进一次年龄。
     ecard_messages_tick(delta_ms);
+
+    // 后台 HTTP 同步完成（新留言落盘或本机语音 ASR 转写回写）后，安全在 LVGL 锁内刷新界面。
+    if (ecard_network_consume_sync_dirty()) {
+        if (s_app_state == ECARD_APP_STATE_PLAYING && s_play_message_id != 0) {
+            ecard_message_t updated;
+            if (ecard_messages_copy_by_id(s_play_message_id, &updated)) {
+                ecard_ui_set_playing_message(&updated);
+            }
+        }
+        ecard_ui_refresh_content();
+    }
 
     // 小智追问录音 10 秒上限；离开 AI 页面立刻关闭会话释放内存。
     if (s_ai_listen) {
@@ -845,13 +955,20 @@ void ecard_app_tick(uint8_t current_hour, uint8_t current_minute, uint32_t delta
 }
 
 void ecard_app_feed_mic_pcm(const int16_t *pcm, size_t samples) {
-    if (s_app_state != ECARD_APP_STATE_RECORDING || !pcm || samples == 0) return;
+    if (s_app_state != ECARD_APP_STATE_RECORDING || s_rec_finish_pending || !pcm || samples == 0) {
+        return;
+    }
 
     uint8_t rem_sec = 0;
     uint8_t amp = 0;
     if (!ecard_voice_write_pcm(pcm, samples, &rem_sec, &amp)) {
-        // 录满上限：自动封包并进入本地试听
-        finish_recording();
+        // 录满上限：若已注册异步回调，交由 input_task 在 LVGL 锁外落盘，避免压爆 audio_task 栈
+        if (s_record_full_cb) {
+            s_rec_finish_pending = true;
+            s_record_full_cb();
+        } else {
+            finish_recording();
+        }
         return;
     }
 

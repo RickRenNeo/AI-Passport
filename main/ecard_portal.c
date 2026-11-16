@@ -296,6 +296,8 @@ static esp_err_t send_connecting_page(httpd_req_t *req, const char *ssid) {
 
 static esp_err_t send_identity_page(httpd_req_t *req, bool show_error) {
     if (!s_html) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+    char relay_esc[256];
+    html_escape(relay_esc, sizeof(relay_esc), ecard_setup_get_relay_url());
     snprintf(s_html, HTML_MAX,
              HTML_HEAD HTML_STYLE "</head><body><div class=card>"
              "<h1>填写身份</h1>"
@@ -311,8 +313,10 @@ static esp_err_t send_identity_page(httpd_req_t *req, bool show_error) {
              "<div id=classRow><label>班级（学生）</label>"
              "<input name=class maxlength=16></div>"
              "<label>姓名</label><input name=name maxlength=24 required>"
-             "<label>绑定手机号（11 位）</label>"
+             "<label>主家长绑定手机号（11 位）</label>"
              "<input name=phone maxlength=11 inputmode=numeric pattern='1[0-9]{10}' required>"
+             "<label>留言中转服务（可选，留空自动发现）</label>"
+             "<input name=relay value='%s' maxlength=120 autocapitalize=none autocomplete=off placeholder='http://192.168.1.10:8787'>"
              "<button type=submit>保存并完成</button></form>"
              "<div class=tip>信息仅保存在本机，用于首页工牌与家长绑定。</div>"
              "<p style='text-align:center;margin-top:14px'><a href=/wifi>返回修改 Wi-Fi</a></p>"
@@ -325,7 +329,8 @@ static esp_err_t send_identity_page(httpd_req_t *req, bool show_error) {
              "id.placeholder=t?'教师工号':'8 位教育 ID';"
              "document.getElementById('classRow').style.display=t?'none':'block';"
              "}syncRole();</script></body></html>",
-             show_error ? "<div class=err>信息不完整或格式不正确，请检查后重试。</div>" : "");
+             show_error ? "<div class=err>信息不完整或格式不正确，请检查后重试。</div>" : "",
+             relay_esc);
     return send_page(req, s_html);
 }
 
@@ -418,6 +423,7 @@ static esp_err_t identity_post(httpd_req_t *req) {
     char klass[24] = {0};
     char name[32] = {0};
     char phone[16] = {0};
+    char relay[128] = {0};
 
     (void)form_get(body, "role", role, sizeof(role));
     const bool ok = form_get(body, "id", id, sizeof(id)) &&
@@ -425,6 +431,7 @@ static esp_err_t identity_post(httpd_req_t *req) {
                     form_get(body, "name", name, sizeof(name)) &&
                     form_get(body, "phone", phone, sizeof(phone));
     (void)form_get(body, "class", klass, sizeof(klass));
+    (void)form_get(body, "relay", relay, sizeof(relay));
     if (!ok) {
         return send_identity_page(req, true);
     }
@@ -440,6 +447,9 @@ static esp_err_t identity_post(httpd_req_t *req) {
     copy_bounded(cfg.phone, sizeof(cfg.phone), phone);
 
     if (!ecard_setup_save_identity(&cfg)) {
+        return send_identity_page(req, true);
+    }
+    if (relay[0] && !ecard_setup_save_relay_url(relay)) {
         return send_identity_page(req, true);
     }
     return redirect_to(req, "/done");

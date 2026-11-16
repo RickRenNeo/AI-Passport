@@ -58,11 +58,67 @@ static void test_network_operations(void) {
     assert(ok);
 }
 
+static void test_sender_acl_and_roles(void) {
+    ecard_network_init();
+
+    assert(ecard_network_parse_role("primary_parent") == ECARD_SENDER_PRIMARY_PARENT);
+    assert(ecard_network_parse_role("family") == ECARD_SENDER_FAMILY);
+    assert(ecard_network_parse_role("teacher") == ECARD_SENDER_TEACHER);
+    assert(ecard_network_parse_role("school_admin") == ECARD_SENDER_SCHOOL_ADMIN);
+    assert(ecard_network_parse_role("student") == ECARD_SENDER_STUDENT);
+    assert(ecard_network_parse_role("stranger") == ECARD_SENDER_UNKNOWN);
+
+    ecard_acl_t acl;
+    memset(&acl, 0, sizeof(acl));
+    strcpy(acl.primary_phone, "13800138000");
+    strcpy(acl.student_school, "第一小学");
+    strcpy(acl.student_class, "三年级二班");
+    acl.family_count = 1;
+    strcpy(acl.family[0].phone, "13800138001");
+    strcpy(acl.family[0].label, "爸爸");
+    acl.teacher_count = 1;
+    strcpy(acl.teachers[0].id, "T001");
+    strcpy(acl.teachers[0].name, "李老师");
+    strcpy(acl.teachers[0].phone, "13900001111");
+    strcpy(acl.teachers[0].school, "第一小学");
+    strcpy(acl.teachers[0].class_name, "三年级二班");
+    acl.admin_count = 1;
+    strcpy(acl.admins[0].id, "A001");
+    strcpy(acl.admins[0].name, "陈主任");
+    strcpy(acl.admins[0].phone, "13900002222");
+    strcpy(acl.admins[0].school, "第一小学");
+
+    ecard_network_set_acl(&acl);
+
+    // Primary parent & bound family
+    assert(ecard_network_is_sender_authorized(ECARD_SENDER_PRIMARY_PARENT, "13800138000", NULL, NULL));
+    assert(!ecard_network_is_sender_authorized(ECARD_SENDER_PRIMARY_PARENT, "13899999999", NULL, NULL));
+    assert(ecard_network_is_sender_authorized(ECARD_SENDER_FAMILY, "13800138001", NULL, NULL));
+    assert(ecard_network_is_sender_authorized(ECARD_SENDER_FAMILY, "13800138000", NULL, NULL));
+    assert(!ecard_network_is_sender_authorized(ECARD_SENDER_FAMILY, "13800138099", NULL, NULL));
+
+    // Class teacher matching school & class
+    assert(ecard_network_is_sender_authorized(ECARD_SENDER_TEACHER, "13900001111", "第一小学", "三年级二班"));
+    assert(!ecard_network_is_sender_authorized(ECARD_SENDER_TEACHER, "13900001111", "第一小学", "三年级一班"));
+    assert(!ecard_network_is_sender_authorized(ECARD_SENDER_TEACHER, "13900001111", "第二小学", "三年级二班"));
+    assert(!ecard_network_is_sender_authorized(ECARD_SENDER_TEACHER, "13900009999", "第一小学", "三年级二班"));
+
+    // School admin matching school
+    assert(ecard_network_is_sender_authorized(ECARD_SENDER_SCHOOL_ADMIN, "13900002222", "第一小学", NULL));
+    assert(!ecard_network_is_sender_authorized(ECARD_SENDER_SCHOOL_ADMIN, "13900002222", "第二小学", NULL));
+    assert(!ecard_network_is_sender_authorized(ECARD_SENDER_SCHOOL_ADMIN, "13900008888", "第一小学", NULL));
+
+    // Student or unknown cannot push inbound messages
+    assert(!ecard_network_is_sender_authorized(ECARD_SENDER_STUDENT, "13800138000", "第一小学", "三年级二班"));
+    assert(!ecard_network_is_sender_authorized(ECARD_SENDER_UNKNOWN, "13800138000", "第一小学", "三年级二班"));
+}
+
 int main(void) {
     printf("Running ecard_network tests...\n");
     test_preset_wifi_credentials();
     test_recess_time_detection();
     test_network_operations();
+    test_sender_acl_and_roles();
     printf("ecard_network tests passed!\n");
     return 0;
 }
