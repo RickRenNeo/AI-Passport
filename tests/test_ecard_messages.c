@@ -1,3 +1,9 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 #include "ecard_messages.h"
 #include <assert.h>
 #include <stdio.h>
@@ -6,7 +12,7 @@
 #include <unistd.h>
 
 static void make_temp_dir(char *buf, size_t size) {
-    snprintf(buf, size, "/tmp/ecard_msg_test_%d", (int)getpid());
+    snprintf(buf, size, "/tmp/ecard_msg_test_%d_XXXXXX", (int)getpid());
     char *res = mkdtemp(buf);
     assert(res != NULL);
 }
