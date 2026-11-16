@@ -27,7 +27,8 @@ typedef enum {
     ECARD_UI_PAGE_POMODORO,  // 番茄钟
     ECARD_UI_PAGE_SETUP,     // 首次配网引导
     ECARD_UI_PAGE_RESET,     // 设备重置确认
-    ECARD_UI_PAGE_DEVICE     // 设备信息
+    ECARD_UI_PAGE_DEVICE,    // 设备信息
+    ECARD_UI_PAGE_PAIR       // 家长扫码配对
 } ecard_ui_page_t;
 
 /**
@@ -65,7 +66,7 @@ void ecard_ui_create(void);
 void ecard_ui_destroy(void);
 
 /**
- * @brief 仅重置导航/模态/空闲计数等逻辑状态，不触碰 LVGL 对象。
+ * @brief 仅重置导航/模态/空闲计数等逻辑状态，不触摸 LVGL 对象。
  *
  * 供应用层重新初始化时使用；设备启动时应在 ecard_ui_create() 之前调用。
  */
@@ -172,6 +173,13 @@ void ecard_ui_set_deck_grade(uint8_t grade);
 void ecard_ui_pomodoro_refresh(void);
 
 /**
+ * @brief 刷新家长扫码配对页（配对码、绑定状态与局域网 IP）。
+ *
+ * 必须在持有 bsp_lvgl_lock() 的条件下调用。
+ */
+void ecard_ui_pair_refresh(void);
+
+/**
  * @brief 显示或更新录音界面。
  *
  * @param remaining_sec 剩余秒数（0..30）
@@ -194,6 +202,9 @@ void ecard_ui_show_ai_listen_modal(uint8_t remaining_sec, uint8_t audio_amplitud
  * @brief 修改当前页面底部提示；页面没有提示条时忽略。
  */
 void ecard_ui_set_hint(const char *text);
+void ecard_ui_set_hint_persistent(const char *text);
+void ecard_ui_clear_pomodoro_hint(void);
+const char *ecard_ui_pomodoro_override_hint(void);
 
 /**
  * @brief 设置当前播放弹窗展示的留言元数据（发送方、角色与语音转写文本）。
@@ -233,17 +244,33 @@ void ecard_ui_hide_modal(void);
 ecard_ui_modal_t ecard_ui_get_modal(void);
 
 /**
- * @brief 喂狗重置 2 分钟无操作计时（按键触发唤醒与重置）。
+ * @brief 喂狗重置无操作计时（按键触发唤醒与重置）。
  */
 void ecard_ui_feed_activity(void);
 
+typedef enum {
+    ECARD_UI_IDLE_NONE = 0,
+    ECARD_UI_IDLE_DIM, /* 番茄钟专注/休息中 1 分钟无操作：暗屏省电（不熄屏） */
+    ECARD_UI_IDLE_OFF  /* 其他页面/状态 2 分钟无操作：熄屏 */
+} ecard_ui_idle_action_t;
+
 /**
- * @brief 检查是否超过 2 分钟无操作需要熄屏/降低背光。
- *
- * 只在从“亮屏”跨入“暗屏”的那一次返回 true；模态层存在时不会触发。
- *
- * @param delta_ms 步进毫秒
- * @return true 表示本次跨入暗屏状态
+ * @brief 轮询两段式无操作电源动作，仅在状态跃迁边沿触发一次。
+ */
+ecard_ui_idle_action_t ecard_ui_poll_idle_state(uint32_t delta_ms);
+
+/**
+ * @brief 当前是否处于 1 分钟暗屏省电状态。
+ */
+bool ecard_ui_is_dimmed(void);
+
+/**
+ * @brief 当前是否处于 2 分钟无操作熄屏状态。
+ */
+bool ecard_ui_is_screen_off(void);
+
+/**
+ * @brief 兼容旧接口：等价于 ecard_ui_poll_idle_state(delta_ms) == ECARD_UI_IDLE_OFF。
  */
 bool ecard_ui_check_idle_timeout(uint32_t delta_ms);
 

@@ -67,6 +67,7 @@ TEXT_SOURCES = (
     "main/ecard_flashcard.c",
     "main/ecard_network.c",
     "main/ecard_pomodoro.c",
+    "main/ecard_cat_room.c",
     "main/ecard_voice.c",
 )
 # Symbols that must survive future text edits even if no current literal uses

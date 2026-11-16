@@ -89,7 +89,7 @@ run_static_checks() {
     "${test_dir}/test_ecard_setup_validate"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_ecard_setup_state.c main/ecard_setup.c main/ecard_setup_validate.c \
-        main/ecard_profile.c \
+        main/ecard_profile.c main/ecard_cat_room.c \
         -o "${test_dir}/test_ecard_setup_state"
     "${test_dir}/test_ecard_setup_state"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
@@ -110,9 +110,18 @@ run_static_checks() {
         -o "${test_dir}/test_ecard_pomodoro"
     "${test_dir}/test_ecard_pomodoro"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_ecard_cat_room.c main/ecard_cat_room.c \
+        -o "${test_dir}/test_ecard_cat_room"
+    "${test_dir}/test_ecard_cat_room"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_ecard_qr.c main/ecard_qr.c \
+        -o "${test_dir}/test_ecard_qr"
+    "${test_dir}/test_ecard_qr"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_ecard_ui.c main/ecard_ui.c main/ecard_profile.c main/ecard_barcode.c \
         main/ecard_quiz.c main/ecard_flashcard.c main/ecard_cards.c \
-        main/ecard_pomodoro.c main/ecard_messages.c main/ecard_voice.c main/ecard_setup.c \
+        main/ecard_pomodoro.c main/ecard_cat_room.c main/ecard_qr.c \
+        main/ecard_messages.c main/ecard_voice.c main/ecard_setup.c \
         main/ecard_setup_validate.c assets/sounds/ecard_demo_voice.c \
         tests/ecard_stubs/ecard_link_stub.c \
         -o "${test_dir}/test_ecard_ui"
@@ -135,7 +144,7 @@ run_static_checks() {
     "${test_dir}/test_ecard_network"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
         -Itests/bsp_stubs -Icomponents/bsp/include -Imain \
-        tests/test_ecard_app.c main/ecard_app.c main/ecard_ui.c main/ecard_profile.c main/ecard_messages.c main/ecard_voice.c main/ecard_network.c main/ecard_barcode.c main/ecard_quiz.c main/ecard_ai_prompt.c main/ecard_flashcard.c main/ecard_cards.c main/ecard_pomodoro.c main/ecard_setup.c main/ecard_setup_validate.c assets/sounds/ecard_demo_voice.c tests/ecard_stubs/ecard_link_stub.c -lm \
+        tests/test_ecard_app.c main/ecard_app.c main/ecard_ui.c main/ecard_profile.c main/ecard_messages.c main/ecard_voice.c main/ecard_network.c main/ecard_barcode.c main/ecard_quiz.c main/ecard_ai_prompt.c main/ecard_flashcard.c main/ecard_cards.c main/ecard_pomodoro.c main/ecard_cat_room.c main/ecard_qr.c main/ecard_setup.c main/ecard_setup_validate.c assets/sounds/ecard_demo_voice.c tests/ecard_stubs/ecard_link_stub.c -lm \
         -o "${test_dir}/test_ecard_app"
     "${test_dir}/test_ecard_app"
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_ecard_fonts.py

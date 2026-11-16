@@ -338,7 +338,7 @@ static int http_json_post(const char *url, const char *body, char *resp, size_t 
     esp_http_client_config_t cfg = {
         .url = url,
         .method = HTTP_METHOD_POST,
-        .timeout_ms = 10000,
+        .timeout_ms = 2500,
         .crt_bundle_attach = (strncmp(url, "https://", 8) == 0) ? esp_crt_bundle_attach : NULL,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
@@ -508,10 +508,12 @@ static void update_acl_from_json(const cJSON *acl_obj, const ecard_setup_t *cfg)
     ecard_network_set_acl(&acl);
 }
 
-static void process_pending_uploads(const char *relay_url, const char *dev_id, const ecard_setup_t *cfg) {
+static bool process_pending_uploads(const char *relay_url, const char *dev_id, const ecard_setup_t *cfg) {
+    if (!s_sos_pending && ecard_xiaozhi_is_busy()) return true;
     ecard_message_t msg;
     int attempts = 0;
     while (attempts++ < 4 && ecard_messages_next_pending_upload(&msg)) {
+        if (!s_sos_pending && ecard_xiaozhi_is_busy()) break;
         char path[128];
         if (!ecard_messages_audio_path(msg.id, path, sizeof(path))) break;
         FILE *fp = fopen(path, "rb");
@@ -554,7 +556,7 @@ static void process_pending_uploads(const char *relay_url, const char *dev_id, c
         esp_http_client_config_t hcfg = {
             .url = url,
             .method = HTTP_METHOD_POST,
-            .timeout_ms = 12000,
+            .timeout_ms = 2000,
             .crt_bundle_attach = (strncmp(url, "https://", 8) == 0) ? esp_crt_bundle_attach : NULL,
         };
         esp_http_client_handle_t client = esp_http_client_init(&hcfg);
@@ -562,7 +564,7 @@ static void process_pending_uploads(const char *relay_url, const char *dev_id, c
             free(url);
             free(resp);
             fclose(fp);
-            break;
+            return false;
         }
         esp_http_client_set_header(client, "Content-Type", "application/octet-stream");
 
@@ -581,7 +583,8 @@ static void process_pending_uploads(const char *relay_url, const char *dev_id, c
             esp_http_client_cleanup(client);
             free(url);
             free(resp);
-            break;
+            s_relay_online = false;
+            return false;
         }
         (void)esp_http_client_fetch_headers(client);
         const int status = esp_http_client_get_status_code(client);
@@ -618,14 +621,17 @@ static void process_pending_uploads(const char *relay_url, const char *dev_id, c
             ESP_LOGW(TAG, "留言上传失败 HTTP %d", status);
             free(url);
             free(resp);
-            break;
+            s_relay_online = false;
+            return false;
         }
         free(url);
         free(resp);
     }
+    return true;
 }
 
 static void process_poll_and_ack(const char *relay_url, const char *dev_id, const ecard_setup_t *cfg) {
+    if (!s_sos_pending && ecard_xiaozhi_is_busy()) return;
     cJSON *req = cJSON_CreateObject();
     if (!req) return;
     cJSON_AddStringToObject(req, "device_id", dev_id);
@@ -642,13 +648,13 @@ static void process_poll_and_ack(const char *relay_url, const char *dev_id, cons
 
     char url[256];
     snprintf(url, sizeof(url), "%s/api/v1/device/poll", relay_url);
-    char *resp = malloc(4096);
+    char *resp = malloc(2048);
     if (!resp) {
         cJSON_free(req_str);
         return;
     }
 
-    const int status = http_json_post(url, req_str, resp, 4096);
+    const int status = http_json_post(url, req_str, resp, 2048);
     cJSON_free(req_str);
     if (status != 200) {
         s_relay_online = false;
@@ -796,20 +802,25 @@ static void process_sos(const char *relay_url, const char *dev_id, const ecard_s
 
 static void sync_worker_task(void *arg) {
     (void)arg;
+    uint32_t wait_ms = 15000;
     for (;;) {
-        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(15000));
+        const uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait_ms));
+        if (notified > 0 || s_sync_requested || s_sos_pending) {
+            wait_ms = 15000;
+        }
 
         if (!ecard_netlink_is_connected() || !ecard_setup_is_provisioned()) {
             continue;
         }
-        // 小智对话活跃时让出堆和带宽（紧急 SOS 除外）
-        if (!s_sos_pending && ecard_xiaozhi_ws_connected()) {
+        // 小智建连（OTA/TLS）或对话活跃时让出堆和带宽（紧急 SOS 除外）
+        if (!s_sos_pending && ecard_xiaozhi_is_busy()) {
             continue;
         }
 
         char relay_url[128];
         if (!resolve_relay_url(relay_url, sizeof(relay_url))) {
             s_relay_online = false;
+            wait_ms = (wait_ms < 30000) ? 30000 : ((wait_ms < 60000) ? 60000 : 120000);
             continue;
         }
 
@@ -818,9 +829,18 @@ static void sync_worker_task(void *arg) {
         device_id_str(dev_id, sizeof(dev_id));
 
         process_sos(relay_url, dev_id, cfg);
-        process_pending_uploads(relay_url, dev_id, cfg);
-        process_poll_and_ack(relay_url, dev_id, cfg);
+        const bool relay_ok = process_pending_uploads(relay_url, dev_id, cfg);
+        if (relay_ok && (s_sos_pending || !ecard_xiaozhi_is_busy())) {
+            process_poll_and_ack(relay_url, dev_id, cfg);
+        } else if (!relay_ok) {
+            s_discovered_relay_url[0] = '\0';
+        }
         s_sync_requested = false;
+        if (s_relay_online) {
+            wait_ms = 15000;
+        } else if (!ecard_xiaozhi_is_busy()) {
+            wait_ms = (wait_ms < 30000) ? 30000 : ((wait_ms < 60000) ? 60000 : 120000);
+        }
     }
 }
 #endif
@@ -828,7 +848,7 @@ static void sync_worker_task(void *arg) {
 void ecard_network_start_sync_worker(void) {
 #if defined(ESP_PLATFORM)
     if (s_sync_task) return;
-    if (xTaskCreate(sync_worker_task, "ecard_sync", 6144, NULL, 2, &s_sync_task) != pdPASS) {
+    if (xTaskCreate(sync_worker_task, "ecard_sync", 5120, NULL, 2, &s_sync_task) != pdPASS) {
         s_sync_task = NULL;
     }
 #endif

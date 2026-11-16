@@ -44,7 +44,18 @@ static QueueHandle_t s_input_queue = NULL;
 static TaskHandle_t s_input_task = NULL;
 static TaskHandle_t s_tick_task = NULL;
 static bool s_input_ready = false;
-static bool s_screen_dimmed = false;
+
+typedef enum {
+    BACKLIGHT_ACTIVE = 0,
+    BACKLIGHT_DIM,
+    BACKLIGHT_OFF
+} backlight_state_t;
+
+static backlight_state_t s_backlight_state = BACKLIGHT_ACTIVE;
+static bool s_wake_swallow_active = false;
+static bool s_wake_swallow_long = false;
+static bool s_wake_swallow_click = false;
+static bsp_btn_t s_wake_swallow_btn = BSP_BTN_OK;
 
 #define KEY_GUARD_MAX_US (10LL * 1000 * 1000)
 static key_guard_t s_key_guard;
@@ -91,21 +102,66 @@ static void input_task(void *arg) {
             uint8_t save_dur = 0;
             size_t save_bytes = 0;
             if (locked) {
-                if (s_screen_dimmed) {
-                    s_screen_dimmed = false;
-                    bsp_display_backlight(100);
-                }
-                const bool finish_by_full = input.record_full &&
-                    ecard_app_get_state() == ECARD_APP_STATE_RECORDING &&
-                    !ecard_app_ai_listening();
-                const bool finish_by_key = !input.record_full &&
-                    input.btn == BSP_BTN_OK && input.event == BSP_BTN_CLICK &&
-                    ecard_app_get_state() == ECARD_APP_STATE_RECORDING &&
-                    !ecard_app_ai_listening();
-                if (finish_by_full || finish_by_key) {
-                    saving_clip = ecard_app_begin_save_recording(&save_dur, &save_bytes);
-                } else if (!input.record_full) {
-                    ecard_app_handle_key(input.btn, input.event);
+                if (input.record_full) {
+                    if (ecard_app_get_state() == ECARD_APP_STATE_RECORDING &&
+                        !ecard_app_ai_listening()) {
+                        saving_clip = ecard_app_begin_save_recording(&save_dur, &save_bytes);
+                    }
+                } else {
+                    bool swallow = false;
+                    if (s_backlight_state == BACKLIGHT_OFF) {
+                        s_backlight_state = BACKLIGHT_ACTIVE;
+                        bsp_display_backlight(100);
+                        ecard_ui_feed_activity();
+                        swallow = true;
+                        s_wake_swallow_btn = input.btn;
+                        if (input.event == BSP_BTN_PRESS) {
+                            s_wake_swallow_active = true;
+                            s_wake_swallow_long = false;
+                            s_wake_swallow_click = false;
+                        } else if (input.event == BSP_BTN_LONG) {
+                            s_wake_swallow_active = true;
+                            s_wake_swallow_long = true;
+                            s_wake_swallow_click = false;
+                        } else {
+                            s_wake_swallow_active = false;
+                            s_wake_swallow_long = false;
+                            s_wake_swallow_click = false;
+                        }
+                    } else if (s_wake_swallow_active && input.btn == s_wake_swallow_btn) {
+                        swallow = true;
+                        if (input.event == BSP_BTN_LONG) {
+                            s_wake_swallow_long = true;
+                        } else if (input.event == BSP_BTN_RELEASE) {
+                            s_wake_swallow_active = false;
+                            s_wake_swallow_click = !s_wake_swallow_long;
+                        }
+                    } else if (s_wake_swallow_click && input.btn == s_wake_swallow_btn &&
+                               (input.event == BSP_BTN_CLICK || input.event == BSP_BTN_DOUBLE)) {
+                        swallow = true;
+                        s_wake_swallow_click = false;
+                    } else {
+                        if (input.event == BSP_BTN_PRESS) {
+                            s_wake_swallow_active = false;
+                            s_wake_swallow_long = false;
+                            s_wake_swallow_click = false;
+                        }
+                        if (s_backlight_state == BACKLIGHT_DIM) {
+                            s_backlight_state = BACKLIGHT_ACTIVE;
+                            bsp_display_backlight(100);
+                        }
+                    }
+                    if (!swallow) {
+                        const bool finish_by_key =
+                            input.btn == BSP_BTN_OK && input.event == BSP_BTN_CLICK &&
+                            ecard_app_get_state() == ECARD_APP_STATE_RECORDING &&
+                            !ecard_app_ai_listening();
+                        if (finish_by_key) {
+                            saving_clip = ecard_app_begin_save_recording(&save_dur, &save_bytes);
+                        } else {
+                            ecard_app_handle_key(input.btn, input.event);
+                        }
+                    }
                 }
                 bsp_lvgl_unlock();
             }
@@ -139,18 +195,34 @@ static void tick_task(void *arg) {
     uint8_t sim_hour = 9;
     uint8_t sim_min = 40;
     uint8_t sim_sec = 0;
+    uint32_t sim_ms = 0;
     int lvgl_log = 0;
+    int64_t last_tick_us = esp_timer_get_time();
 
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));
+        const int64_t now_us = esp_timer_get_time();
+        int64_t raw_ms = (now_us - last_tick_us) / 1000;
+        if (raw_ms < 1) raw_ms = 1;
+        if (raw_ms > 10000) {
+            raw_ms = 10000;
+            last_tick_us = now_us;
+        } else {
+            last_tick_us += raw_ms * 1000;
+        }
+        const uint32_t delta_ms = (uint32_t)raw_ms;
 
-        sim_sec++;
-        if (sim_sec >= 60) {
-            sim_sec = 0;
-            sim_min++;
-            if (sim_min >= 60) {
-                sim_min = 0;
-                sim_hour = (sim_hour + 1) % 24;
+        sim_ms += delta_ms;
+        while (sim_ms >= 1000) {
+            sim_ms -= 1000;
+            sim_sec++;
+            if (sim_sec >= 60) {
+                sim_sec = 0;
+                sim_min++;
+                if (sim_min >= 60) {
+                    sim_min = 0;
+                    sim_hour = (sim_hour + 1) % 24;
+                }
             }
         }
 
@@ -175,11 +247,21 @@ static void tick_task(void *arg) {
             ecard_ui_set_ai_connected(ecard_xiaozhi_ws_connected() &&
                                           ecard_xiaozhi_session_ready());
             ecard_ui_setup_refresh();
-            if (ecard_ui_check_idle_timeout(1000)) {
-                s_screen_dimmed = true;
+            const ecard_ui_idle_action_t idle_act = ecard_ui_poll_idle_state(delta_ms);
+            if (idle_act == ECARD_UI_IDLE_DIM) {
+                s_backlight_state = BACKLIGHT_DIM;
                 bsp_display_backlight(8);
+            } else if (idle_act == ECARD_UI_IDLE_OFF) {
+                s_backlight_state = BACKLIGHT_OFF;
+                bsp_display_backlight(0);
             }
-            ecard_app_tick(hour, minute, 1000);
+            ecard_app_tick(hour, minute, delta_ms);
+            if (s_backlight_state != BACKLIGHT_ACTIVE &&
+                !ecard_ui_is_screen_off() &&
+                !ecard_ui_is_dimmed()) {
+                s_backlight_state = BACKLIGHT_ACTIVE;
+                bsp_display_backlight(100);
+            }
             // LVGL 池是静态 .bss：它的大小直接决定系统堆的连续余量。
             // 每 5 秒报一次真实用量/峰值，才能判断能否缩池给 Opus 编码器让路。
             if (++lvgl_log >= 5) {

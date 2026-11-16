@@ -1,4 +1,5 @@
 #include "ecard_setup.h"
+#include "ecard_cat_room.h"
 #include "ecard_profile.h"
 #include <string.h>
 
@@ -169,6 +170,7 @@ bool ecard_setup_clear(void) {
     memset(&s_setup, 0, sizeof(s_setup));
     s_setup.role = ECARD_ACCOUNT_STUDENT;
     memset(s_relay_url, 0, sizeof(s_relay_url));
+    ecard_cat_room_reset_all();
 #if defined(ESP_PLATFORM)
     nvs_handle_t handle;
     if (nvs_open(SETUP_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) return false;

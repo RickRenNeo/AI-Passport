@@ -70,6 +70,9 @@ uint8_t ecard_pomodoro_completed(void);
 /** 当前阶段总时长（毫秒），用于进度环。 */
 uint32_t ecard_pomodoro_phase_total_ms(void);
 
+/** 取出并清零最近一次自然完成 FOCUS 轮次的分钟数；未完成或被中止返回 0。 */
+uint8_t ecard_pomodoro_take_completed_focus_minutes(void);
+
 #ifdef __cplusplus
 }
 #endif

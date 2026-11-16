@@ -133,6 +133,35 @@ static void test_stop_keeps_completed(void) {
     assert(ecard_pomodoro_completed() == 1);
 }
 
+static void test_completed_focus_minutes_award_and_abort(void) {
+    ecard_pomodoro_reset();
+    assert(ecard_pomodoro_take_completed_focus_minutes() == 0);
+
+    // 1. Completing 35-minute focus round reports 35 once, then clears to 0
+    ecard_pomodoro_set_focus_minutes(35);
+    ecard_pomodoro_start();
+    ecard_pomodoro_tick(34u * 60u * 1000u);
+    assert(ecard_pomodoro_take_completed_focus_minutes() == 0);
+    ecard_pomodoro_tick(1u * 60u * 1000u);
+    assert(ecard_pomodoro_phase() == ECARD_POMODORO_BREAK);
+    assert(ecard_pomodoro_take_completed_focus_minutes() == 35);
+    assert(ecard_pomodoro_take_completed_focus_minutes() == 0);
+
+    // 2. Stopping early clears pending minutes and awards 0
+    ecard_pomodoro_stop();
+    ecard_pomodoro_set_focus_minutes(25);
+    ecard_pomodoro_start();
+    ecard_pomodoro_tick(24u * 60u * 1000u);
+    ecard_pomodoro_stop();
+    assert(ecard_pomodoro_take_completed_focus_minutes() == 0);
+
+    // 3. Reset clears any unconsumed completion
+    ecard_pomodoro_start();
+    ecard_pomodoro_tick(25u * 60u * 1000u);
+    ecard_pomodoro_reset();
+    assert(ecard_pomodoro_take_completed_focus_minutes() == 0);
+}
+
 int main(void) {
     printf("Running ecard_pomodoro tests...\n");
     test_initial_state();
@@ -143,6 +172,7 @@ int main(void) {
     test_long_break_after_four();
     test_overshoot_in_one_tick();
     test_stop_keeps_completed();
+    test_completed_focus_minutes_award_and_abort();
     printf("ecard_pomodoro tests passed!\n");
     return 0;
 }
