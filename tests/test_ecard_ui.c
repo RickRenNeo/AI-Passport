@@ -5,6 +5,7 @@
 #include "ecard_ui.h"
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
 
 static void test_idle_timeout_2min(void) {
     ecard_pomodoro_reset();
@@ -191,9 +192,32 @@ static void test_page_navigation(void) {
     ecard_ui_hide_modal();
 
     ecard_ui_reset_navigation();
+    assert(!ecard_cat_room_is_bound());
     assert(!ecard_cat_room_is_pairing_active());
     assert(ecard_ui_get_page() == ECARD_UI_PAGE_HOME);
     assert(ecard_ui_get_modal() == ECARD_UI_MODAL_NONE);
+}
+
+static void test_pomodoro_points_and_redeem_copy(void) {
+    ecard_cat_room_reset_all();
+    char pts[32];
+    ecard_ui_format_pomodoro_points(pts, sizeof(pts));
+    assert(strcmp(pts, "可用积分：0") == 0);
+
+    (void)ecard_cat_room_award_focus_minutes(25);
+    ecard_ui_format_pomodoro_points(pts, sizeof(pts));
+    assert(strcmp(pts, "可用积分：25") == 0);
+
+    for (int i = 0; i < 200; ++i) {
+        (void)ecard_cat_room_award_focus_minutes(50);
+    }
+    ecard_ui_format_pomodoro_points(pts, sizeof(pts));
+    assert(strcmp(pts, "可用积分：9999") == 0);
+
+    const char *rem = ecard_ui_pomodoro_redeem_reminder();
+    assert(rem != NULL);
+    assert(strcmp(rem, "攒够积分找家长\n小程序里兑奖励") == 0);
+    ecard_cat_room_reset_all();
 }
 
 int main(void) {
@@ -203,6 +227,7 @@ int main(void) {
     test_idle_timeout_paused_by_modal();
     test_modal_state_machine();
     test_page_navigation();
+    test_pomodoro_points_and_redeem_copy();
     printf("ecard_ui tests passed!\n");
     return 0;
 }

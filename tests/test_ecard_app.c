@@ -690,7 +690,7 @@ static void test_pomodoro_on_demand_ai_and_points_and_abort(void) {
     ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_CLICK);
     assert(ecard_pomodoro_phase() == ECARD_POMODORO_IDLE);
 
-    // 3. 完成一轮 25 分钟 FOCUS 后自动记入 +10 待领积分，并从暗屏状态自动唤醒
+    // 3. 完成一轮 25 分钟 FOCUS 后自动记入 +25 积分，并从暗屏状态自动唤醒
     ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
     assert(ecard_pomodoro_phase() == ECARD_POMODORO_FOCUS);
     assert(ecard_ui_poll_idle_state(60000) == ECARD_UI_IDLE_DIM);
@@ -700,7 +700,7 @@ static void test_pomodoro_on_demand_ai_and_points_and_abort(void) {
     }
     assert(ecard_pomodoro_phase() == ECARD_POMODORO_BREAK);
     assert(!ecard_ui_is_dimmed());
-    assert(ecard_cat_room_pending_points() == 10);
+    assert(ecard_cat_room_pending_points() == 25);
     assert(ecard_cat_room_completed_sessions() == 1);
 
     // 3b. 完成 5 分钟 BREAK 进入 DONE 后，按 UP/DOWN 应退回 IDLE 并实时更新专注时长
@@ -720,7 +720,7 @@ static void test_pomodoro_on_demand_ai_and_points_and_abort(void) {
     ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_LONG);
     assert(ecard_ui_get_page() == ECARD_UI_PAGE_MENU);
     assert(ecard_pomodoro_phase() == ECARD_POMODORO_IDLE);
-    assert(ecard_cat_room_pending_points() == 10);
+    assert(ecard_cat_room_pending_points() == 25);
 
     // 5. 回到菜单重进，开始 FOCUS 并在剩 1 秒暂停后长按 OK 离开 / 长按 DOWN SOS，也必须 0 分中止
     ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
@@ -733,7 +733,7 @@ static void test_pomodoro_on_demand_ai_and_points_and_abort(void) {
     assert(!ecard_pomodoro_is_running());
     ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_LONG); // SOS cancels pomodoro
     assert(ecard_pomodoro_phase() == ECARD_POMODORO_IDLE);
-    assert(ecard_cat_room_pending_points() == 10);
+    assert(ecard_cat_room_pending_points() == 25);
     ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_RELEASE);
     assert(ecard_ui_get_page() == ECARD_UI_PAGE_POMODORO);
     ecard_pomodoro_reset();

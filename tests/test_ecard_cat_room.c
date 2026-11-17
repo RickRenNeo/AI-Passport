@@ -52,12 +52,23 @@ static void test_defaults_and_points(void) {
     assert(strstr(qr, code_buf) != NULL);
     assert(strstr(qr, "\"ip\":\"192.168.1.42\"") != NULL);
 
-    // 25 min -> +10 pts, 50 min -> +20 pts, 0 min -> 0
-    assert(ecard_cat_room_award_focus_minutes(25) == 10);
-    assert(ecard_cat_room_award_focus_minutes(50) == 20);
+    // 1 focus minute = 1 point, capped at ECARD_CAT_ROOM_MAX_POINTS (9999)
+    assert(ecard_cat_room_award_focus_minutes(25) == 25);
+    assert(ecard_cat_room_award_focus_minutes(50) == 50);
     assert(ecard_cat_room_award_focus_minutes(0) == 0);
-    assert(ecard_cat_room_pending_points() == 30);
+    assert(ecard_cat_room_pending_points() == 75);
+    assert(ecard_cat_room_available_points() == 75);
     assert(ecard_cat_room_completed_sessions() == 2);
+
+    // Accumulate up to 9999 cap: 75 + 198 * 50 = 9975, next 50 awards only 24 -> 9999, next awards 0
+    for (int i = 0; i < 198; ++i) {
+        assert(ecard_cat_room_award_focus_minutes(50) == 50);
+    }
+    assert(ecard_cat_room_available_points() == 9975);
+    assert(ecard_cat_room_award_focus_minutes(50) == 24);
+    assert(ecard_cat_room_available_points() == 9999);
+    assert(ecard_cat_room_award_focus_minutes(25) == 0);
+    assert(ecard_cat_room_available_points() == 9999);
 }
 
 static void test_http_pairing_privacy_and_permissions(void) {
@@ -235,7 +246,8 @@ static void test_http_pairing_privacy_and_permissions(void) {
     assert(ecard_cat_room_parent_count() == 4);
 
     // Claim, redeem, equip as primary parent
-    (void)ecard_cat_room_award_focus_minutes(50); // +20 pending
+    (void)ecard_cat_room_award_focus_minutes(20); // +20 pending
+    assert(ecard_cat_room_available_points() == 20);
     dirty = false;
     assert(ecard_cat_room_handle_http("POST", "/api/cat-room/claim", mom_auth, "{}",
                                         "AABBCCDDEEFF", "192.168.1.42", 80,
@@ -244,6 +256,7 @@ static void test_http_pairing_privacy_and_permissions(void) {
     assert(strstr(resp, "\"claimed_delta\":20") != NULL);
     assert(ecard_cat_room_pending_points() == 0);
     assert(ecard_cat_room_claimed_points() == 20);
+    assert(ecard_cat_room_available_points() == 20);
 
     // Second claim is atomic & idempotent with 0 delta
     dirty = false;
@@ -273,7 +286,17 @@ static void test_http_pairing_privacy_and_permissions(void) {
                                         resp, sizeof(resp), &dirty) == 200);
     assert(dirty);
     assert(ecard_cat_room_claimed_points() == 0);
+    assert(ecard_cat_room_available_points() == 0);
     assert(ecard_cat_room_is_unlocked(ECARD_ROOM_SLOT_CHAIR, 1));
+
+    // Direct redeem using pending_points + claimed_points without manual /claim
+    (void)ecard_cat_room_award_focus_minutes(20); // +20 pending -> 20 available
+    assert(ecard_cat_room_available_points() == 20);
+    assert(ecard_cat_room_handle_http("POST", "/api/cat-room/redeem", mom_auth,
+                                        "{\"item_id\":\"wall_sakura\"}",
+                                        "AABBCCDDEEFF", "192.168.1.42", 80,
+                                        resp, sizeof(resp), &dirty) == 200);
+    assert(ecard_cat_room_available_points() == 0);
 
     dirty = false;
     assert(ecard_cat_room_handle_http("POST", "/api/cat-room/equip", mom_auth,
@@ -288,6 +311,7 @@ static void test_http_pairing_privacy_and_permissions(void) {
     assert(ecard_cat_room_handle_http("GET", "/api/cat-room", mom_auth, NULL,
                                         "AABBCCDDEEFF", "192.168.1.42", 80,
                                         large_resp, sizeof(large_resp), &dirty) == 200);
+    assert(strstr(large_resp, "\"available_points\":0") != NULL);
     assert(strstr(large_resp, "\"chair\":\"chair_cat_pink\"") != NULL);
     assert(strstr(large_resp, "\"desk_lucky_cat\"") != NULL);
     assert(strstr(large_resp, "\"rug_paw\"") != NULL);

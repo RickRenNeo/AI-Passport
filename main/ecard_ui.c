@@ -83,6 +83,17 @@ static char s_pomo_override_hint[64] = {0};
 static uint32_t s_pomo_hint_ttl_ms = 0;
 static bool s_pomo_hint_persistent = false;
 
+void ecard_ui_format_pomodoro_points(char *out, size_t out_size) {
+    if (!out || out_size == 0) return;
+    uint16_t avail = ecard_cat_room_available_points();
+    if (avail > ECARD_CAT_ROOM_MAX_POINTS) avail = ECARD_CAT_ROOM_MAX_POINTS;
+    snprintf(out, out_size, "可用积分：%u", (unsigned)avail);
+}
+
+const char *ecard_ui_pomodoro_redeem_reminder(void) {
+    return "攒够积分找家长\n小程序里兑奖励";
+}
+
 #if HAS_LVGL_RUNTIME
 
 LV_FONT_DECLARE(ecard_font_9);
@@ -177,7 +188,6 @@ static lv_obj_t *s_pomo_pts_pill = NULL;
 static lv_obj_t *s_pomo_pts = NULL;
 static lv_obj_t *s_pomo_time = NULL;
 static lv_obj_t *s_pomo_bar = NULL;
-static lv_obj_t *s_pomo_round = NULL;
 static lv_obj_t *s_pomo_tip = NULL;
 static lv_obj_t *s_pomo_stage = NULL;
 static lv_obj_t *s_pomo_lamp_glow = NULL;
@@ -493,7 +503,6 @@ static void reset_page_pointers(void) {
     s_pomo_pts = NULL;
     s_pomo_time = NULL;
     s_pomo_bar = NULL;
-    s_pomo_round = NULL;
     s_pomo_tip = NULL;
     s_pomo_stage = NULL;
     s_pomo_lamp_glow = NULL;
@@ -1042,80 +1051,85 @@ static void create_pomodoro_page(void) {
     s_screen = create_page_root();
     create_status_bar(s_screen);
 
-    /* 顶部紧凑状态卡：阶段胶囊 + 轮次 + 积分 + 倒计时 + 进度条 */
-    lv_obj_t *top = make_box(s_screen, 10, 24, 220, 62, C_SURFACE, C_LINE, 14);
-    s_pomo_phase_pill = make_box(top, 8, 5, 68, 18, C_BLUE_SOFT, NO_BORDER, 9);
-    s_pomo_phase = make_label(s_pomo_phase_pill, "", &ecard_font_12, C_BLUE, 0, 2, 68,
+    /* 顶部状态卡：首行左右排布阶段胶囊与 9999 可用积分胶囊，次行左侧 48px 倒计时 + 右侧双行兑奖提示，底行进度条 */
+    lv_obj_t *top = make_box(s_screen, 10, 22, 220, 73, C_SURFACE, C_LINE, 14);
+    s_pomo_phase_pill = make_box(top, 8, 5, 68, 18, C_LINE, NO_BORDER, 9);
+    s_pomo_phase = make_label(s_pomo_phase_pill, "", &ecard_font_12, C_MUTED, 0, 2, 68,
                               LV_TEXT_ALIGN_CENTER);
-    s_pomo_pts_pill = make_box(top, 140, 5, 72, 18, C_AMBER_BG, NO_BORDER, 9);
-    s_pomo_pts = make_label(s_pomo_pts_pill, "", &ecard_font_12, 0xB45309, 0, 2, 72,
+    s_pomo_pts_pill = make_box(top, 114, 5, 98, 18, C_AMBER_BG, NO_BORDER, 9);
+    s_pomo_pts = make_label(s_pomo_pts_pill, "", &ecard_font_12, 0xB45309, 0, 2, 98,
                             LV_TEXT_ALIGN_CENTER);
 
-    s_pomo_time = make_label(top, "25:00", &ecard_font_22, C_NAVY, 10, 26, 92,
+    s_pomo_time = make_label(top, "25:00", &ecard_font_48, C_NAVY, 7, 19, 118,
                              LV_TEXT_ALIGN_LEFT);
-    s_pomo_round = make_label(top, "", &ecard_font_12, C_MUTED, 96, 31, 116,
-                              LV_TEXT_ALIGN_RIGHT);
-    lv_obj_t *bar_bg = make_box(top, 8, 52, 204, 5, C_LINE, NO_BORDER, 3);
-    s_pomo_bar = make_box(bar_bg, 0, 0, 0, 5, C_BLUE, NO_BORDER, 3);
+    lv_obj_set_style_text_letter_space(s_pomo_time, -1, 0);
 
-    /* 现代潮玩治愈系小猫书房舞台 (220x178) */
-    s_pomo_stage = make_box(s_screen, 10, 90, 220, 178, 0xFFFDF8, C_LINE, 16);
+    lv_obj_t *lbl_redeem = make_label(top, ecard_ui_pomodoro_redeem_reminder(),
+                                      &ecard_font_12, 0xB45309, 126, 30, 86,
+                                      LV_TEXT_ALIGN_RIGHT);
+    lv_obj_set_style_text_line_space(lbl_redeem, 2, 0);
+
+    lv_obj_t *bar_bg = make_box(top, 8, 66, 204, 4, C_LINE, NO_BORDER, 2);
+    s_pomo_bar = make_box(bar_bg, 0, 0, 0, 4, C_BLUE, NO_BORDER, 2);
+
+    /* 现代潮玩治愈系小猫书房舞台 (220x173) */
+    s_pomo_stage = make_box(s_screen, 10, 98, 220, 173, 0xFFFDF8, C_LINE, 16);
     lv_obj_set_style_bg_grad_color(s_pomo_stage, lv_color_hex(0xF6E8D7), 0);
     lv_obj_set_style_bg_grad_dir(s_pomo_stage, LV_GRAD_DIR_VER, 0);
 
     /* 墙脚踢脚线 + 暖木渐变地板 */
-    make_box(s_pomo_stage, 1, 115, 218, 5, 0xFFFBF5, NO_BORDER, 0);
-    make_box(s_pomo_stage, 1, 120, 218, 2, 0xDFCBB3, NO_BORDER, 0);
-    lv_obj_t *floor_bg = make_box(s_pomo_stage, 1, 122, 218, 55, 0xF3DFC8, NO_BORDER, 14);
+    make_box(s_pomo_stage, 1, 112, 218, 5, 0xFFFBF5, NO_BORDER, 0);
+    make_box(s_pomo_stage, 1, 117, 218, 2, 0xDFCBB3, NO_BORDER, 0);
+    lv_obj_t *floor_bg = make_box(s_pomo_stage, 1, 119, 218, 53, 0xF3DFC8, NO_BORDER, 14);
     lv_obj_set_style_bg_grad_color(floor_bg, lv_color_hex(0xDFBF9C), 0);
     lv_obj_set_style_bg_grad_dir(floor_bg, LV_GRAD_DIR_VER, 0);
-    make_box(s_pomo_stage, 1, 122, 218, 16, 0xF3DFC8, NO_BORDER, 0); /* 保持地板上沿平直 */
+    make_box(s_pomo_stage, 1, 119, 218, 16, 0xF3DFC8, NO_BORDER, 0); /* 保持地板上沿平直 */
 
     /* 木地板细缝与家具柔和环境阴影 */
-    for (int fy = 136; fy <= 166; fy += 15) {
+    for (int fy = 133; fy <= 163; fy += 15) {
         lv_obj_t *seam = make_box(s_pomo_stage, 2, fy, 216, 1, 0xCEAA82, NO_BORDER, 0);
         lv_obj_set_style_bg_opa(seam, LV_OPA_30, 0);
     }
-    lv_obj_t *amb_sh = make_box(s_pomo_stage, 24, 134, 172, 12, 0x8F6B4B, NO_BORDER, 6);
+    lv_obj_t *amb_sh = make_box(s_pomo_stage, 24, 131, 172, 12, 0x8F6B4B, NO_BORDER, 6);
     lv_obj_set_style_bg_opa(amb_sh, LV_OPA_10, 0);
 
     s_pomo_img_rug = lv_image_create(s_pomo_stage);
-    lv_obj_set_pos(s_pomo_img_rug, 40, 144);
+    lv_obj_set_pos(s_pomo_img_rug, 40, 141);
     lv_obj_clear_flag(s_pomo_img_rug, LV_OBJ_FLAG_CLICKABLE);
 
     s_pomo_img_wdecor = lv_image_create(s_pomo_stage);
-    lv_obj_set_pos(s_pomo_img_wdecor, 12, 8);
+    lv_obj_set_pos(s_pomo_img_wdecor, 12, 6);
     lv_obj_clear_flag(s_pomo_img_wdecor, LV_OBJ_FLAG_CLICKABLE);
 
     s_pomo_lamp_glow = lv_image_create(s_pomo_stage);
     lv_image_set_src(s_pomo_lamp_glow, &ecard_lamp_glow);
-    lv_obj_set_pos(s_pomo_lamp_glow, 130, 35);
+    lv_obj_set_pos(s_pomo_lamp_glow, 130, 32);
     lv_obj_clear_flag(s_pomo_lamp_glow, LV_OBJ_FLAG_CLICKABLE);
 
     s_pomo_img_chair = lv_image_create(s_pomo_stage);
-    lv_obj_set_pos(s_pomo_img_chair, 72, 74);
+    lv_obj_set_pos(s_pomo_img_chair, 72, 71);
     lv_obj_clear_flag(s_pomo_img_chair, LV_OBJ_FLAG_CLICKABLE);
 
     /* 现代圆润原木书桌 (3D 精灵) */
     lv_obj_t *desk_table = lv_image_create(s_pomo_stage);
     lv_image_set_src(desk_table, &ecard_desk_table);
-    lv_obj_set_pos(desk_table, 12, 98);
+    lv_obj_set_pos(desk_table, 12, 95);
     lv_obj_clear_flag(desk_table, LV_OBJ_FLAG_CLICKABLE);
 
     s_pomo_img_desk = lv_image_create(s_pomo_stage);
-    lv_obj_set_pos(s_pomo_img_desk, 20, 67);
+    lv_obj_set_pos(s_pomo_img_desk, 20, 64);
     lv_obj_clear_flag(s_pomo_img_desk, LV_OBJ_FLAG_CLICKABLE);
 
     s_pomo_img_lamp = lv_image_create(s_pomo_stage);
-    lv_obj_set_pos(s_pomo_img_lamp, 152, 54);
+    lv_obj_set_pos(s_pomo_img_lamp, 152, 51);
     lv_obj_clear_flag(s_pomo_img_lamp, LV_OBJ_FLAG_CLICKABLE);
 
     s_pomo_img_cat = lv_image_create(s_pomo_stage);
-    lv_obj_set_pos(s_pomo_img_cat, 68, 36);
+    lv_obj_set_pos(s_pomo_img_cat, 68, 33);
     lv_obj_clear_flag(s_pomo_img_cat, LV_OBJ_FLAG_CLICKABLE);
 
     /* 舞台下方陪伴提示条 */
-    lv_obj_t *tip_box = make_box(s_screen, 10, 273, 220, 24, C_SURFACE, C_LINE, 12);
+    lv_obj_t *tip_box = make_box(s_screen, 10, 274, 220, 24, C_SURFACE, C_LINE, 12);
     s_pomo_tip = make_label(tip_box, "", &ecard_font_12, C_INK, 8, 5, 204,
                             LV_TEXT_ALIGN_CENTER);
 
@@ -1145,6 +1159,7 @@ static void update_pomodoro_content(void) {
     if (!s_pomo_time) return;
 
     const ecard_pomodoro_phase_t phase = ecard_pomodoro_phase();
+    const bool running = ecard_pomodoro_is_running();
     const bool idle = (phase == ECARD_POMODORO_IDLE || phase == ECARD_POMODORO_DONE);
     const uint32_t total = ecard_pomodoro_phase_total_ms();
 
@@ -1169,20 +1184,8 @@ static void update_pomodoro_content(void) {
         lv_obj_set_width(s_pomo_bar, done_w);
     }
 
-    char round[40];
-    snprintf(round, sizeof(round), "第 %u 轮 · 已完成 %u",
-             (unsigned)(ecard_pomodoro_completed() + 1),
-             (unsigned)ecard_pomodoro_completed());
-    label_set_text(s_pomo_round, round);
-
-    const uint16_t pending = ecard_cat_room_pending_points();
-    const uint16_t claimed = ecard_cat_room_claimed_points();
     char pts[32];
-    if (pending > 0) {
-        snprintf(pts, sizeof(pts), "待领+%u", (unsigned)pending);
-    } else {
-        snprintf(pts, sizeof(pts), "积分 %u", (unsigned)claimed);
-    }
+    ecard_ui_format_pomodoro_points(pts, sizeof(pts));
     if (s_pomo_pts) label_set_text(s_pomo_pts, pts);
 
     /* 同步 6 个房间装修槽位精灵（仅变化时更新 LVGL 属性） */
@@ -1228,7 +1231,7 @@ static void update_pomodoro_content(void) {
     }
     if (s_pomo_lamp_glow) {
         const uint8_t glow_on = (lamp_v > 0 && phase == ECARD_POMODORO_FOCUS &&
-                                 ecard_pomodoro_is_running()) ? 1 : 0;
+                                 running) ? 1 : 0;
         if (s_pomo_cached_glow != glow_on) {
             s_pomo_cached_glow = glow_on;
             if (glow_on) {
@@ -1258,12 +1261,12 @@ static void update_pomodoro_content(void) {
              (unsigned)ecard_pomodoro_focus_minutes());
     const char *tip = idle_tip;
     if (phase == ECARD_POMODORO_FOCUS) {
-        tip = ecard_pomodoro_is_running() ? "小猫陪你认真学习中 · 加油！"
-                                          : "已暂停 · 按 OK 键继续学习";
+        tip = running ? "小猫陪你认真学习中 · 加油！"
+                      : "已暂停 · 按 OK 键继续学习";
     } else if (phase == ECARD_POMODORO_BREAK || phase == ECARD_POMODORO_LONG_BREAK) {
         tip = "休息一下，站起来喝口水吧";
     } else if (phase == ECARD_POMODORO_DONE) {
-        tip = "本轮专注完成！积分已记录";
+        tip = "专注完成！快请家长在小程序兑奖吧";
     }
     label_set_text(s_pomo_tip, tip);
 
@@ -1276,13 +1279,22 @@ static void update_pomodoro_content(void) {
         }
     }
 
-    if (s_pomo_cached_phase != (uint8_t)phase) {
-        s_pomo_cached_phase = (uint8_t)phase;
+    const uint8_t style_key = (uint8_t)(((uint8_t)phase << 1) | (running ? 1u : 0u));
+    if (s_pomo_cached_phase != style_key) {
+        s_pomo_cached_phase = style_key;
         const uint32_t fg_colors[5] = {C_MUTED, C_BLUE, C_GREEN, 0xB45309, C_NAVY};
-        const uint32_t bg_colors[5] = {C_LINE, C_BLUE_SOFT, 0xECFDF5, C_AMBER_BG, C_BLUE_SOFT};
-        lv_obj_set_style_text_color(s_pomo_phase, lv_color_hex(fg_colors[phase]), 0);
+        const uint32_t bg_colors[5] = {0xEEF3F8, C_BLUE_SOFT, 0xECFDF5, C_AMBER_BG, C_BLUE_SOFT};
+        uint32_t fg = fg_colors[phase];
+        uint32_t bg = bg_colors[phase];
+        if (!running && (phase == ECARD_POMODORO_FOCUS ||
+                         phase == ECARD_POMODORO_BREAK ||
+                         phase == ECARD_POMODORO_LONG_BREAK)) {
+            fg = 0xB45309;
+            bg = C_AMBER_BG;
+        }
+        lv_obj_set_style_text_color(s_pomo_phase, lv_color_hex(fg), 0);
         if (s_pomo_phase_pill) {
-            lv_obj_set_style_bg_color(s_pomo_phase_pill, lv_color_hex(bg_colors[phase]), 0);
+            lv_obj_set_style_bg_color(s_pomo_phase_pill, lv_color_hex(bg), 0);
         }
     }
 }

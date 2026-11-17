@@ -22,6 +22,7 @@ typedef enum {
 #define ECARD_ROOM_VARIANTS_PER_SLOT 4
 #define ECARD_ROOM_ITEM_COUNT (ECARD_ROOM_SLOT_COUNT * ECARD_ROOM_VARIANTS_PER_SLOT)
 #define ECARD_ROOM_MAX_SECONDARY_PARENTS 4
+#define ECARD_CAT_ROOM_MAX_POINTS 9999u
 
 typedef struct {
     const char *id;
@@ -37,6 +38,7 @@ void ecard_cat_room_reset_all(void);
 uint16_t ecard_cat_room_award_focus_minutes(uint8_t focus_minutes);
 uint16_t ecard_cat_room_pending_points(void);
 uint16_t ecard_cat_room_claimed_points(void);
+uint16_t ecard_cat_room_available_points(void);
 uint32_t ecard_cat_room_completed_sessions(void);
 
 uint8_t ecard_cat_room_equipped(ecard_room_slot_t slot);

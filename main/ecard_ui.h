@@ -171,6 +171,8 @@ void ecard_ui_set_deck_grade(uint8_t grade);
  * 必须在持有 bsp_lvgl_lock() 的条件下调用。
  */
 void ecard_ui_pomodoro_refresh(void);
+void ecard_ui_format_pomodoro_points(char *out, size_t out_size);
+const char *ecard_ui_pomodoro_redeem_reminder(void);
 
 /**
  * @brief 刷新家长扫码配对页（配对码、绑定状态与局域网 IP）。

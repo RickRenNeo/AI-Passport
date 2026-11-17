@@ -207,6 +207,14 @@ static void load_locked(void) {
                     s_state.equipped[s] = 0;
                 }
             }
+            if (s_state.claimed_points > ECARD_CAT_ROOM_MAX_POINTS) {
+                s_state.claimed_points = ECARD_CAT_ROOM_MAX_POINTS;
+            }
+            const uint16_t max_pending =
+                (uint16_t)(ECARD_CAT_ROOM_MAX_POINTS - s_state.claimed_points);
+            if (s_state.pending_points > max_pending) {
+                s_state.pending_points = max_pending;
+            }
         }
         nvs_close(handle);
     }
@@ -278,11 +286,20 @@ void ecard_cat_room_reset_all(void) {
     room_unlock();
 }
 
+static uint16_t available_points_locked(void) {
+    const uint32_t sum = (uint32_t)s_state.pending_points + (uint32_t)s_state.claimed_points;
+    return sum > ECARD_CAT_ROOM_MAX_POINTS ? (uint16_t)ECARD_CAT_ROOM_MAX_POINTS : (uint16_t)sum;
+}
+
 uint16_t ecard_cat_room_award_focus_minutes(uint8_t focus_minutes) {
     if (focus_minutes == 0) return 0;
     room_lock();
     ensure_loaded_locked();
-    const uint16_t pts = (uint16_t)(((uint32_t)focus_minutes * 2u) / 5u);
+    const uint16_t avail = available_points_locked();
+    const uint16_t room = (avail < ECARD_CAT_ROOM_MAX_POINTS)
+                              ? (uint16_t)(ECARD_CAT_ROOM_MAX_POINTS - avail)
+                              : 0u;
+    const uint16_t pts = ((uint16_t)focus_minutes > room) ? room : (uint16_t)focus_minutes;
     if (pts > 0) {
         s_state.pending_points = (uint16_t)(s_state.pending_points + pts);
     }
@@ -304,6 +321,14 @@ uint16_t ecard_cat_room_claimed_points(void) {
     room_lock();
     ensure_loaded_locked();
     const uint16_t v = s_state.claimed_points;
+    room_unlock();
+    return v;
+}
+
+uint16_t ecard_cat_room_available_points(void) {
+    room_lock();
+    ensure_loaded_locked();
+    const uint16_t v = available_points_locked();
     room_unlock();
     return v;
 }
@@ -948,6 +973,8 @@ static int handle_http_locked(const char *method, const char *path,
         sw_uint(&w, s_state.pending_points);
         sw_raw(&w, ",\"claimed_points\":");
         sw_uint(&w, s_state.claimed_points);
+        sw_raw(&w, ",\"available_points\":");
+        sw_uint(&w, available_points_locked());
         sw_raw(&w, ",\"completed_sessions\":");
         sw_uint(&w, s_state.completed_sessions);
         sw_raw(&w, ",\"equipped\":{");
@@ -985,7 +1012,7 @@ static int handle_http_locked(const char *method, const char *path,
     if (is_post && path_is(path, "/api/cat-room/claim")) {
         const uint16_t delta = s_state.pending_points;
         if (delta > 0) {
-            s_state.claimed_points = (uint16_t)(s_state.claimed_points + delta);
+            s_state.claimed_points = available_points_locked();
             s_state.pending_points = 0;
             save_state();
             if (out_ui_dirty) *out_ui_dirty = true;
@@ -998,6 +1025,8 @@ static int handle_http_locked(const char *method, const char *path,
         sw_uint(&w, s_state.pending_points);
         sw_raw(&w, ",\"claimed_points\":");
         sw_uint(&w, s_state.claimed_points);
+        sw_raw(&w, ",\"available_points\":");
+        sw_uint(&w, available_points_locked());
         sw_raw(&w, "}");
         return finish_json(&w, resp_buf, resp_size);
     }
@@ -1013,10 +1042,12 @@ static int handle_http_locked(const char *method, const char *path,
             return make_error(resp_buf, resp_size, 404, "item_not_found");
         }
         if (!is_unlocked_locked(it->slot, it->variant)) {
-            if (s_state.claimed_points < it->cost) {
+            const uint16_t avail = available_points_locked();
+            if (avail < it->cost) {
                 return make_error(resp_buf, resp_size, 400, "insufficient_points");
             }
-            s_state.claimed_points = (uint16_t)(s_state.claimed_points - it->cost);
+            s_state.claimed_points = (uint16_t)(avail - it->cost);
+            s_state.pending_points = 0;
             s_state.unlocked_mask |= item_bit(it->slot, it->variant);
             save_state();
             if (out_ui_dirty) *out_ui_dirty = true;
@@ -1027,6 +1058,8 @@ static int handle_http_locked(const char *method, const char *path,
         sw_json_str(&w, it->id);
         sw_raw(&w, ",\"unlocked\":true,\"claimed_points\":");
         sw_uint(&w, s_state.claimed_points);
+        sw_raw(&w, ",\"available_points\":");
+        sw_uint(&w, available_points_locked());
         sw_raw(&w, "}");
         return finish_json(&w, resp_buf, resp_size);
     }
