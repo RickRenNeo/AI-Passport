@@ -10,8 +10,10 @@
 #endif
 #include "ecard_ai_prompt.h"
 #include "ecard_cards.h"
+#include "ecard_cat_room.h"
 #include "ecard_netlink.h"
 #include "ecard_flashcard.h"
+#include "ecard_lan_http.h"
 #include "ecard_messages.h"
 #include "ecard_network.h"
 #include "ecard_pomodoro.h"
@@ -46,7 +48,7 @@ static bool s_play_clears_unread = false;
 static uint32_t s_play_message_id = 0;
 // 设备页“长按 UP 重试连接”的进行态与超时。
 static bool s_net_retrying = false;
-// 小智只在答题讲解、古诗/单词朗读页启用；首页录音与留言不触发。
+// 小智只在答题讲解、古诗/单词朗读页常驻；番茄钟采用按需连接。
 static bool s_ai_session = false;
 static bool s_ai_listen = false;
 // 本轮追问是否由“长按 UP”启动：只有这种录音才在松开 UP 时自动发送。
@@ -55,9 +57,24 @@ static bool s_ai_long_listen = false;
 static bool s_ai_swallow_up_click = false;
 // 上一次会话是否正在后台收尾（TLS 关闭 + 找回录音缓冲）。
 static bool s_ai_stopping = false;
+static volatile bool s_ai_stop_done = false;
 // 会话异常重建：stop 完成后立即重开一次。
 static bool s_ai_reopen = false;
 static uint16_t s_ai_listen_ms = 0;
+// 番茄钟按需小智会话状态（就绪/完成后宽限 20 秒自动释放，恢复局域网 HTTP）
+#define ECARD_POMO_AI_GRACE_MS 20000
+#define ECARD_POMO_AI_CONNECT_TIMEOUT_MS 15000
+static bool s_ai_prepping = false;
+static volatile bool s_ai_prep_done = false;
+static volatile bool s_ai_prep_cancel = false;
+static volatile bool s_ai_resuming = false;
+static bool s_pomo_ai_owned = false;
+static bool s_pomo_ai_held = false;
+static bool s_pomo_ai_pending_listen = false;
+static bool s_pomo_ai_used_listen = false;
+static bool s_pomo_ai_ready_notified = false;
+static uint16_t s_pomo_ai_grace_ms = 0;
+static uint16_t s_pomo_ai_connect_ms = 0;
 static uint16_t s_net_retry_ms = 0;
 // 录音浮层按 100ms 刷新一次，避免 20ms 音频块把 LVGL 刷屏
 static uint8_t s_rec_ui_div = 0;
@@ -138,65 +155,151 @@ static void stop_playback(void) {
 #define ECARD_AI_LISTEN_MAX_MS 10000
 
 static bool ai_page_active(ecard_ui_page_t page) {
-    // 番茄钟也算 AI 页：专注期间长按 UP 可以随时问小智，多轮对话不掉线。
     return page == ECARD_UI_PAGE_QUIZ || page == ECARD_UI_PAGE_POEM ||
            page == ECARD_UI_PAGE_WORD || page == ECARD_UI_PAGE_POEM_PICK ||
-           page == ECARD_UI_PAGE_WORD_PICK || page == ECARD_UI_PAGE_POMODORO;
+           page == ECARD_UI_PAGE_WORD_PICK;
+}
+
+#if defined(ESP_PLATFORM)
+// 关闭/重启局域网 HTTP 涉及 httpd_stop/lwIP 套接字等待，必须在 LVGL 锁外运行，
+// 否则按一次按键会让专注时钟和屏幕刷新卡死数秒。
+static void ai_prep_task(void *arg) {
+    (void)arg;
+    ecard_lan_http_set_ai_busy(true);
+    if (!s_ai_prep_cancel) {
+        ecard_xiaozhi_session_start();
+    }
+    s_ai_prep_done = true;
+    vTaskDelete(NULL);
+}
+
+static void ai_resume_task(void *arg) {
+    (void)arg;
+    ecard_lan_http_set_ai_busy(false);
+    s_ai_resuming = false;
+    vTaskDelete(NULL);
+}
+
+// 关闭 TLS/WebSocket 会阻塞几百毫秒；绝不能放在 LVGL 锁里，
+// 否则按键要等 500 ms 才拿到锁（实测连续丢 4~5 个按键）。
+static void ai_stop_task(void *arg) {
+    (void)arg;
+    ecard_xiaozhi_session_stop();
+    s_ai_stop_done = true;
+    vTaskDelete(NULL);
+}
+#endif
+
+static void ai_resume_lan_http_async(void) {
+#if defined(ESP_PLATFORM)
+    if (!s_ai_resuming) {
+        s_ai_resuming = true;
+        if (xTaskCreate(ai_resume_task, "ai_http_on", 3072, NULL, 3, NULL) == pdPASS) {
+            return;
+        }
+        s_ai_resuming = false;
+    } else {
+        return;
+    }
+#endif
+    ecard_lan_http_set_ai_busy(false);
 }
 
 static void ai_session_begin(void) {
-    // 上一次会话正在后台收尾（TLS 关闭 + 找回录音缓冲），此时不要抢跑。
-    if (s_ai_stopping) return;
+    // 上一次会话正在后台收尾（TLS 关闭 + 找回录音缓冲），登记 reopen，收尾完立即启动。
+    if (s_ai_stopping) {
+        s_ai_reopen = true;
+        return;
+    }
     if (ecard_portal_is_active()) {
         ecard_portal_stop();
     }
     if (!s_ai_session) {
         ESP_LOGI("ecard_ai", "建立小智会话");
         // TLS + Opus 约需 40 KB：把上一次录音占着的 40 KB 缓冲让出来，
-        // 空闲堆足够时握手后才收得到服务端 hello。
+        // 空闲堆足够时握手后才收到服务端 hello。
         ecard_voice_clip_release();
         s_clip_message_id = 0;
         s_ai_session = true;
     }
+#if defined(ESP_PLATFORM)
+    if (s_ai_prepping) {
+        s_ai_prep_cancel = false;
+        return;
+    }
+    if (ecard_lan_http_is_running() || s_ai_resuming) {
+        s_ai_prep_cancel = false;
+        s_ai_prep_done = false;
+        s_ai_prepping = true;
+        if (xTaskCreate(ai_prep_task, "ai_http_off", 4096, NULL, 3, NULL) == pdPASS) {
+            return;
+        }
+        s_ai_prepping = false;
+        s_ai_prep_done = false;
+    }
+#endif
+    ecard_lan_http_set_ai_busy(true);
     // 连接失败后再次进入 AI 入口时允许重试；已在连接中则直接返回。
     ecard_xiaozhi_session_start();
 }
 
-#if defined(ESP_PLATFORM)
-// 关闭 TLS/WebSocket 会阻塞几百毫秒；绝不能放在 LVGL 锁里，
-// 否则按键要等 500 ms 才拿到锁（实测连续丢 4~5 个按键）。
-static void ai_stop_task(void *arg) {
-    (void)arg;
-    ecard_xiaozhi_session_stop();
-    // 录音缓冲不再常驻：下次录音时按当时空闲堆直接分配（正常都是 10 秒）。
-    s_ai_stopping = false;
-    // 会话异常重建路径：学生仍留在 AI 页面，立刻重连，不用等下一次按键。
-    if (s_ai_reopen && ai_page_active(ecard_ui_get_page())) {
-        s_ai_reopen = false;
-        ai_session_begin();
-    }
-    vTaskDelete(NULL);
-}
-#endif
-
 static void ai_session_end(void) {
-    if (!s_ai_session) return;
+    if (!s_ai_session) {
+        if (!s_ai_stopping && !s_ai_prepping) {
+            ai_resume_lan_http_async();
+        }
+        return;
+    }
     s_ai_listen = false;
     s_ai_long_listen = false;
     s_ai_swallow_up_click = false;
     s_ai_session = false;
+    if (s_ai_prepping) {
+        // ai_prep_task 还在关停局域网 HTTP：登记取消标记，由 tick 发现 !s_ai_session 后再收尾。
+        s_ai_prep_cancel = true;
+        return;
+    }
 #if defined(ESP_PLATFORM)
     if (!s_ai_stopping) {
+        s_ai_stop_done = false;
         s_ai_stopping = true;
         if (xTaskCreate(ai_stop_task, "ai_stop", 4096, NULL, 3, NULL) == pdPASS) {
             return;
         }
         s_ai_stopping = false;
+        s_ai_stop_done = false;
     } else {
         return;
     }
 #endif
     ecard_xiaozhi_session_stop();
+    ecard_lan_http_set_ai_busy(false);
+}
+
+static void leave_pomodoro_page(void) {
+    ecard_pomodoro_stop();
+    (void)ecard_pomodoro_take_completed_focus_minutes();
+    s_pomo_ai_held = false;
+    s_pomo_ai_pending_listen = false;
+    s_pomo_ai_used_listen = false;
+    s_pomo_ai_ready_notified = false;
+    s_pomo_ai_grace_ms = 0;
+    s_pomo_ai_connect_ms = 0;
+    s_ai_reopen = false;
+    ecard_ui_clear_pomodoro_hint();
+    if (s_ai_listen) {
+        ecard_xiaozhi_listen_stop();
+        s_ai_listen = false;
+        s_ai_long_listen = false;
+        s_ai_swallow_up_click = false;
+        ecard_ui_hide_modal();
+        s_app_state = ECARD_APP_STATE_IDLE;
+    }
+    if (s_pomo_ai_owned || s_ai_session) {
+        ecard_xiaozhi_reset_playback();
+        s_pomo_ai_owned = false;
+        ai_session_end();
+    }
 }
 
 /* 小智文本入口的长度上限与提示词构造统一放在 ecard_ai_prompt.c，
@@ -290,6 +393,9 @@ static void ai_finish_listen(void) {
     const bool had_audio = ecard_xiaozhi_listen_had_audio();
     s_ai_listen = false;
     s_ai_long_listen = false;
+    s_pomo_ai_held = false;
+    s_pomo_ai_grace_ms = 0;
+    s_pomo_ai_used_listen = true;
     // 满 10 秒自动停止时学生可能还按着 UP：记录一次待吞掉的 CLICK。
     s_ai_swallow_up_click = true;
     ecard_ui_hide_modal();
@@ -432,7 +538,12 @@ static void finish_recording(void) {
 
 static void begin_sos_pending(void) {
     s_rec_finish_pending = false;
-    if (s_app_state == ECARD_APP_STATE_RECORDING) {
+    if (s_ai_listen) {
+        ecard_xiaozhi_listen_stop();
+        s_ai_listen = false;
+        s_ai_long_listen = false;
+        s_ai_swallow_up_click = false;
+    } else if (s_app_state == ECARD_APP_STATE_RECORDING) {
         const uint8_t *adpcm = NULL;
         size_t len = 0;
         uint8_t dur = 0;
@@ -445,6 +556,9 @@ static void begin_sos_pending(void) {
         s_play_clears_unread = false;
     }
     s_page_before_sos = ecard_ui_get_page();
+    if (s_page_before_sos == ECARD_UI_PAGE_POMODORO) {
+        leave_pomodoro_page();
+    }
     ecard_ui_hide_modal();
     s_app_state = ECARD_APP_STATE_SOS_PENDING;
     s_sos_remaining_ms = ECARD_SOS_CONFIRM_MS;
@@ -498,6 +612,90 @@ static void handle_idle_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
         }
     }
 
+    // 番茄钟页：按需连接小智，避免常态占用约 40 KB 堆而阻塞局域网 HTTP。
+    // 专注/休息计时中：点按 UP 即可松手触发后台连接，连上后保持 20 秒就绪窗口（常驻提示）；
+    // 长按 UP 若已就绪直接说话，未就绪则边连接边等待，提前松手也会留在后台继续连。
+    // 未开始/已结束阶段：短按 UP 仍为专注时长 +5 分钟；长按 UP 仍可按需唤醒小智。
+    if (page == ECARD_UI_PAGE_POMODORO && btn == BSP_BTN_UP) {
+        const ecard_pomodoro_phase_t phase = ecard_pomodoro_phase();
+        const bool idle = (phase == ECARD_POMODORO_IDLE || phase == ECARD_POMODORO_DONE);
+        if (ev == BSP_BTN_LONG) {
+            s_pomo_ai_held = true;
+            s_pomo_ai_grace_ms = 0;
+            if (!ecard_netlink_is_connected()) {
+                ecard_ui_set_hint("没有联网：请先连上 Wi-Fi 再按 UP");
+                s_pomo_ai_held = false;
+                s_pomo_ai_pending_listen = false;
+                return;
+            }
+            if (!s_pomo_ai_owned || !s_ai_session) {
+                s_pomo_ai_connect_ms = 0;
+                s_pomo_ai_used_listen = false;
+                s_pomo_ai_ready_notified = false;
+            }
+            s_pomo_ai_owned = true;
+            ai_session_begin();
+            if (!s_ai_stopping && !s_ai_prepping && ecard_xiaozhi_session_ready()) {
+                if (!s_ai_listen && ai_start_listen()) {
+                    s_ai_long_listen = true;
+                    s_pomo_ai_used_listen = true;
+                }
+            } else {
+                s_pomo_ai_pending_listen = true;
+                ecard_ui_set_hint_persistent("正在连接小智…");
+            }
+            return;
+        }
+        if (ev == BSP_BTN_RELEASE) {
+            s_pomo_ai_held = false;
+            if (s_ai_long_listen) {
+                ai_finish_listen();
+                return;
+            }
+            if (s_pomo_ai_pending_listen) {
+                s_pomo_ai_pending_listen = false;
+                s_pomo_ai_grace_ms = 0;
+                if (!s_ai_stopping && !s_ai_prepping && ecard_xiaozhi_session_ready()) {
+                    ecard_ui_set_hint_persistent("小智已就绪，长按 UP 说话");
+                    s_pomo_ai_ready_notified = true;
+                } else {
+                    ecard_ui_set_hint_persistent("正在连接小智…");
+                }
+                return;
+            }
+        }
+        if (ev == BSP_BTN_CLICK) {
+            if (s_ai_swallow_up_click) {
+                s_ai_swallow_up_click = false;
+                return;
+            }
+            if (!idle) {
+                s_pomo_ai_held = false;
+                s_pomo_ai_pending_listen = false;
+                s_pomo_ai_grace_ms = 0;
+                if (!ecard_netlink_is_connected()) {
+                    ecard_ui_set_hint("没有联网：请先连上 Wi-Fi 再按 UP");
+                    return;
+                }
+                if (!s_pomo_ai_owned || !s_ai_session) {
+                    s_pomo_ai_connect_ms = 0;
+                    s_pomo_ai_used_listen = false;
+                    s_pomo_ai_ready_notified = false;
+                }
+                s_pomo_ai_owned = true;
+                ai_session_begin();
+                if (!s_ai_stopping && !s_ai_prepping && ecard_xiaozhi_session_ready()) {
+                    ecard_ui_set_hint_persistent("小智已就绪，长按 UP 说话");
+                    s_pomo_ai_ready_notified = true;
+                } else {
+                    s_pomo_ai_ready_notified = false;
+                    ecard_ui_set_hint_persistent("正在连接小智…");
+                }
+                return;
+            }
+        }
+    }
+
     // AI 页面：长按 UP 开始追问，松开 UP 发送。必须放在各页面的
     // 无条件 return 之前，否则答题/古诗/单词页会把 LONG 事件吞掉。
     if (ai_page_active(page) && btn == BSP_BTN_UP) {
@@ -524,7 +722,9 @@ static void handle_idle_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
         } else if (page == ECARD_UI_PAGE_MENU) {
             ecard_ui_show_page(ECARD_UI_PAGE_HOME);
         } else {
-            if (ai_page_active(page)) {
+            if (page == ECARD_UI_PAGE_POMODORO) {
+                leave_pomodoro_page();
+            } else if (ai_page_active(page)) {
                 ecard_xiaozhi_reset_playback();
             }
             ecard_ui_show_page(ECARD_UI_PAGE_MENU);
@@ -582,13 +782,24 @@ static void handle_idle_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
             ecard_ui_pomodoro_refresh();
         } else if (btn == BSP_BTN_DOWN && ev == BSP_BTN_CLICK) {
             if (idle) {
+                if (phase == ECARD_POMODORO_DONE) ecard_pomodoro_stop();
                 ecard_pomodoro_set_focus_minutes(
                     (uint8_t)(ecard_pomodoro_focus_minutes() - ECARD_POMODORO_FOCUS_STEP));
             } else {
                 ecard_pomodoro_stop();
+                if (s_pomo_ai_owned && !s_ai_listen && !ecard_xiaozhi_is_speaking()) {
+                    s_pomo_ai_owned = false;
+                    s_pomo_ai_held = false;
+                    s_pomo_ai_pending_listen = false;
+                    s_pomo_ai_grace_ms = 0;
+                    s_pomo_ai_connect_ms = 0;
+                    ai_session_end();
+                    ecard_ui_clear_pomodoro_hint();
+                }
             }
             ecard_ui_pomodoro_refresh();
         } else if (btn == BSP_BTN_UP && ev == BSP_BTN_CLICK && idle) {
+            if (phase == ECARD_POMODORO_DONE) ecard_pomodoro_stop();
             ecard_pomodoro_set_focus_minutes(
                 (uint8_t)(ecard_pomodoro_focus_minutes() + ECARD_POMODORO_FOCUS_STEP));
             ecard_ui_pomodoro_refresh();
@@ -686,8 +897,6 @@ static void handle_idle_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
                 break;
             case ECARD_MENU_POMODORO:
                 ecard_ui_show_page(ECARD_UI_PAGE_POMODORO);
-                // 专注期间要能随时追问：进页就把会话连好，状态栏绿点即为就绪。
-                ai_session_begin();
                 break;
             case ECARD_MENU_DEVICE:
             default:
@@ -704,6 +913,9 @@ static void handle_idle_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
             }
             break;
         }
+        case ECARD_UI_PAGE_PAIR:
+            ecard_ui_show_page(ECARD_UI_PAGE_DEVICE);
+            break;
         case ECARD_UI_PAGE_DEVICE:
         default:
             ecard_ui_show_page(ECARD_UI_PAGE_MENU);
@@ -732,6 +944,11 @@ static void handle_idle_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
             ecard_ui_messages_move(-1);
         } else if (page == ECARD_UI_PAGE_HOME) {
             sync_unread_messages();
+        } else if (page == ECARD_UI_PAGE_DEVICE) {
+            ecard_ui_show_page(ECARD_UI_PAGE_PAIR);
+        } else if (page == ECARD_UI_PAGE_PAIR) {
+            ecard_cat_room_rotate_pair_code();
+            ecard_ui_pair_refresh();
         }
         return;
     }
@@ -747,6 +964,7 @@ static void handle_idle_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
 
 void ecard_app_init(void) {
     ecard_profile_init_default();
+    ecard_cat_room_init();
     ecard_network_init();
     ecard_messages_init();
     ecard_voice_init();
@@ -772,9 +990,21 @@ void ecard_app_init(void) {
     s_ai_long_listen = false;
     s_ai_swallow_up_click = false;
     s_ai_stopping = false;
+    s_ai_stop_done = false;
+    s_ai_prepping = false;
+    s_ai_prep_done = false;
+    s_ai_prep_cancel = false;
+    s_ai_resuming = false;
     s_ai_reopen = false;
     s_menu_press_moved = false;
     s_ai_listen_ms = 0;
+    s_pomo_ai_owned = false;
+    s_pomo_ai_held = false;
+    s_pomo_ai_pending_listen = false;
+    s_pomo_ai_used_listen = false;
+    s_pomo_ai_ready_notified = false;
+    s_pomo_ai_grace_ms = 0;
+    s_pomo_ai_connect_ms = 0;
     s_rec_ui_div = 0;
     s_rec_finish_pending = false;
 }
@@ -782,6 +1012,9 @@ void ecard_app_init(void) {
 void ecard_app_handle_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
     // 任何按键动作均重置 2 分钟无操作计时，并唤醒屏幕
     ecard_ui_feed_activity();
+    if (btn == BSP_BTN_UP && ev == BSP_BTN_PRESS) {
+        s_ai_swallow_up_click = false;
+    }
 
     // 首次配网是强制流程：在完成 Wi-Fi 与身份之前，不允许长按 OK 逃到菜单，
     // 也不允许长按 DOWN 触发求助。
@@ -789,7 +1022,7 @@ void ecard_app_handle_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
     if (current_page == ECARD_UI_PAGE_SETUP) {
         if (btn == BSP_BTN_OK && ev == BSP_BTN_LONG) {
             (void)ecard_portal_start();
-            // 已联网时不要为了“重试”把好连接断掉；只有未联网才重连。
+            // 已联网时不要为了“重试”把好连接断开；只有未联网才重连。
             if (!ecard_netlink_is_connected()) {
                 ecard_netlink_reconnect();
             }
@@ -873,7 +1106,37 @@ void ecard_app_tick(uint8_t current_hour, uint8_t current_minute, uint32_t delta
         ecard_ui_refresh_content();
     }
 
-    // 小智追问录音 10 秒上限；离开 AI 页面立刻关闭会话释放内存。
+    // 小智追问录音 10 秒上限；离开 AI 页面或番茄钟宽限超时后关闭会话、恢复局域网 HTTP。
+    const ecard_ui_page_t cur_page = ecard_ui_get_page();
+    if (s_ai_prepping && s_ai_prep_done) {
+        const bool canceled = s_ai_prep_cancel;
+        s_ai_prep_done = false;
+        s_ai_prepping = false;
+        s_ai_prep_cancel = false;
+        if (!canceled && s_ai_session &&
+            (ai_page_active(cur_page) || (cur_page == ECARD_UI_PAGE_POMODORO && s_pomo_ai_owned))) {
+            ecard_xiaozhi_session_start();
+        } else if (ecard_xiaozhi_is_busy()) {
+            s_ai_session = true;
+            ai_session_end();
+        } else {
+            s_ai_session = false;
+            s_pomo_ai_owned = false;
+            ai_resume_lan_http_async();
+        }
+    }
+    if (s_ai_stopping && s_ai_stop_done) {
+        s_ai_stop_done = false;
+        s_ai_stopping = false;
+        if (s_ai_reopen &&
+            (ai_page_active(cur_page) || (cur_page == ECARD_UI_PAGE_POMODORO && s_pomo_ai_owned))) {
+            s_ai_reopen = false;
+            ai_session_begin();
+        } else {
+            s_ai_reopen = false;
+            ai_resume_lan_http_async();
+        }
+    }
     if (s_ai_listen) {
         s_ai_listen_ms = (uint16_t)(s_ai_listen_ms + delta_ms);
         if (s_ai_listen_ms >= ECARD_AI_LISTEN_MAX_MS) {
@@ -885,7 +1148,78 @@ void ecard_app_tick(uint8_t current_hour, uint8_t current_minute, uint32_t delta
             // 计时每秒刷新，学生能看到录音仍在进行，松手就会发送。
             ecard_ui_show_ai_listen_modal(sec, 0);
         }
-    } else if (s_ai_session && !ai_page_active(ecard_ui_get_page())) {
+    } else if (cur_page == ECARD_UI_PAGE_POMODORO && s_pomo_ai_owned) {
+        if (s_pomo_ai_pending_listen) {
+            if (!s_pomo_ai_held) {
+                s_pomo_ai_pending_listen = false;
+            } else if (!s_ai_stopping && !s_ai_prepping && ecard_xiaozhi_session_ready()) {
+                s_pomo_ai_pending_listen = false;
+                s_pomo_ai_connect_ms = 0;
+                if (ai_start_listen()) {
+                    s_ai_long_listen = true;
+                    s_pomo_ai_used_listen = true;
+                    s_pomo_ai_grace_ms = 0;
+                }
+            } else if (!s_ai_stopping) {
+                s_pomo_ai_connect_ms = (uint16_t)(s_pomo_ai_connect_ms + delta_ms);
+                if ((!s_ai_prepping && (ecard_xiaozhi_connect_failed() || ecard_xiaozhi_restart_pending())) ||
+                    s_pomo_ai_connect_ms >= ECARD_POMO_AI_CONNECT_TIMEOUT_MS) {
+                    s_pomo_ai_pending_listen = false;
+                    s_pomo_ai_held = false;
+                    s_pomo_ai_owned = false;
+                    s_pomo_ai_grace_ms = 0;
+                    s_pomo_ai_connect_ms = 0;
+                    ai_session_end();
+                    ecard_ui_pomodoro_refresh();
+                    ecard_ui_set_hint("小智连接失败，请稍后再试");
+                }
+            }
+        } else if (s_ai_session) {
+            if (ecard_xiaozhi_restart_pending() && !s_ai_stopping) {
+                s_ai_reopen = false;
+                s_pomo_ai_owned = false;
+                s_pomo_ai_grace_ms = 0;
+                s_pomo_ai_connect_ms = 0;
+                ai_session_end();
+                ecard_ui_pomodoro_refresh();
+                ecard_ui_set_hint("小智连接失败，请稍后再试");
+            } else if (s_pomo_ai_held || ecard_xiaozhi_is_speaking()) {
+                s_pomo_ai_grace_ms = 0;
+                s_pomo_ai_connect_ms = 0;
+            } else if (!s_ai_stopping && !s_ai_prepping && ecard_xiaozhi_session_ready()) {
+                s_pomo_ai_connect_ms = 0;
+                if (!s_pomo_ai_used_listen && !s_pomo_ai_ready_notified) {
+                    s_pomo_ai_ready_notified = true;
+                    s_pomo_ai_grace_ms = 0;
+                    ecard_ui_set_hint_persistent("小智已就绪，长按 UP 说话");
+                } else {
+                    s_pomo_ai_grace_ms = (uint16_t)(s_pomo_ai_grace_ms + delta_ms);
+                }
+                if (s_pomo_ai_grace_ms >= ECARD_POMO_AI_GRACE_MS) {
+                    s_pomo_ai_owned = false;
+                    s_pomo_ai_grace_ms = 0;
+                    ai_session_end();
+                    ecard_ui_clear_pomodoro_hint();
+                }
+            } else if (!s_ai_stopping) {
+                s_pomo_ai_connect_ms = (uint16_t)(s_pomo_ai_connect_ms + delta_ms);
+                if ((!s_ai_prepping && ecard_xiaozhi_connect_failed()) ||
+                    s_pomo_ai_connect_ms >= ECARD_POMO_AI_CONNECT_TIMEOUT_MS) {
+                    s_pomo_ai_owned = false;
+                    s_pomo_ai_grace_ms = 0;
+                    s_pomo_ai_connect_ms = 0;
+                    ai_session_end();
+                    ecard_ui_pomodoro_refresh();
+                    ecard_ui_set_hint("小智连接失败，请稍后再试");
+                }
+            }
+        } else if (!s_ai_stopping) {
+            s_pomo_ai_owned = false;
+            s_pomo_ai_connect_ms = 0;
+        }
+    } else if (s_ai_session && !ai_page_active(cur_page)) {
+        s_pomo_ai_owned = false;
+        s_pomo_ai_connect_ms = 0;
         ai_session_end();
     } else if (s_ai_session && !s_ai_listen &&
                ecard_xiaozhi_restart_pending() && !s_ai_stopping) {
@@ -935,9 +1269,17 @@ void ecard_app_tick(uint8_t current_hour, uint8_t current_minute, uint32_t delta
         s_has_polled_current_recess = false;
     }
 
-    // 番茄钟计时与界面刷新
-    ecard_pomodoro_tick(delta_ms);
+    // 番茄钟仅在当前停留于番茄钟页时计时；完整结束 FOCUS 才记入待领积分
     if (ecard_ui_get_page() == ECARD_UI_PAGE_POMODORO) {
+        const ecard_pomodoro_phase_t prev_phase = ecard_pomodoro_phase();
+        ecard_pomodoro_tick(delta_ms);
+        const uint8_t done_min = ecard_pomodoro_take_completed_focus_minutes();
+        if (done_min > 0) {
+            (void)ecard_cat_room_award_focus_minutes(done_min);
+        }
+        if (ecard_pomodoro_phase() != prev_phase) {
+            ecard_ui_feed_activity();
+        }
         ecard_ui_pomodoro_refresh();
     }
 

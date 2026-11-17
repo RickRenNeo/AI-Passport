@@ -1,4 +1,5 @@
 #include "ecard_netlink.h"
+#include "ecard_lan_http.h"
 #include "ecard_network.h"
 #include "ecard_portal.h"
 #include "ecard_setup.h"
@@ -62,8 +63,9 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         s_connected = false;
         s_ssid[0] = '\0';
         s_elapsed_ms = 0;
+        ecard_lan_http_stop();
         if (s_scanning || s_reconnecting) {
-            // 扫描或切换凭据前的主动断开：不计数、不提示，避免配网页误报失败。
+            // 扫描或切换凭据前的主动断开：不计数、不提示，避免配网网页误报失败。
             s_reconnecting = false;
             return;
         }
@@ -93,6 +95,9 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         ecard_time_start_sync();
         ecard_network_request_sync();
         ecard_xiaozhi_start();
+        if (ecard_setup_is_provisioned() && !ecard_portal_is_active()) {
+            (void)ecard_lan_http_start();
+        }
     }
 }
 

@@ -493,7 +493,7 @@ bool ecard_messages_mount_spiffs(void) {
         esp_vfs_spiffs_conf_t conf = {
             .base_path = "/spiffs",
             .partition_label = "storage",
-            .max_files = 6,
+            .max_files = 3,
             .format_if_mount_failed = true,
         };
         const esp_err_t err = esp_vfs_spiffs_register(&conf);

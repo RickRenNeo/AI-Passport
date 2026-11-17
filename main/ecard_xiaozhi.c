@@ -24,6 +24,12 @@
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <errno.h>
+#include <esp_transport.h>
+#include <esp_transport_ssl.h>
+#include <esp_transport_tcp.h>
+#include <esp_transport_ws.h>
+#include <lwip/sockets.h>
 #include <nvs.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,7 +37,7 @@
 
 #define TAG "ecard_xiaozhi"
 #define NVS_NAMESPACE "xiaozhi"
-#define RESPONSE_MAX 4096
+#define RESPONSE_MAX 2048
 #define WS_BUFFER_SIZE 1024
 #define WS_TASK_STACK 4096
 #define TEXT_MAX 192
@@ -46,12 +52,23 @@ static char s_client_id[40];
 
 /* WebSocket 传输层状态：连接、会话与最近一次服务端事件，供后续 UI 读取。 */
 static esp_websocket_client_handle_t s_ws;
+static esp_transport_handle_t s_ws_base;
+static esp_transport_handle_t s_ws_trans;
 static bool s_ws_started;
 static bool s_ota_running;
 static bool s_ws_connected;
+static volatile bool s_force_ota;
+static volatile bool s_connect_failed;
+static volatile bool s_ota_abort;
+static volatile bool s_retried_ota_this_session;
+static volatile bool s_listen_pending;
+static volatile int64_t s_listen_pending_until_us;
+static uint32_t s_ws_tx_drop_count;
+static int64_t s_ws_tx_drop_log_us;
 /* 客户端任务已经 FINISH（服务端关闭且未自动重连）：必须整会话重建，
  * 否则 session_start() 会一直认为“会话已在进行中”，学生永远看到“连接中”。 */
 static volatile bool s_ws_dead;
+static volatile bool s_ws_stopping;
 static char s_pending_prompt[640];
 static bool s_pending_prompt_valid;
 static char s_prompt_fallback[96];
@@ -73,7 +90,7 @@ static volatile uint32_t s_pcm_overflows;
 static volatile uint32_t s_decoded_frames;
 static volatile int64_t s_last_rx_us;
 /* 最近一次提问与重播次数：服务端 RST 断流后自动重问一次，
- * 否则学生只会听到“两句话就没了”，必须手动再按一次。 */
+ * 否则学生只会听到“两句话就没了”，必须手动再按一次卡。 */
 static char s_last_prompt[640];
 static char s_last_prompt_fallback[96];
 static uint8_t s_replay_count;
@@ -83,7 +100,7 @@ static bool s_follow_valid;
 
 /* 控制消息发送队列：UI 线程只入队，绝不直接在 LVGL 锁内写 socket。
  * 之前 socket 半死时 send_text 会把按键线程卡住 10 秒，队列满后按键全丢。 */
-#define XZ_TX_ITEM_MAX 384
+#define XZ_TX_ITEM_MAX 256
 #define XZ_TX_QUEUE_LEN 4
 
 typedef struct {
@@ -105,6 +122,7 @@ typedef enum {
 
 static bool ensure_audio_worker(void);
 static void release_audio_worker(void);
+static bool switch_audio_mode_timeout(xz_audio_mode_t target, uint32_t wait_ms);
 static bool switch_audio_mode(xz_audio_mode_t target);
 static void arm_replay_after_disconnect(bool interrupted);
 static SemaphoreHandle_t s_state_lock;
@@ -316,42 +334,106 @@ static void copy_text(char *dst, size_t size, const char *src) {
     dst[len] = '\0';
 }
 
-static void ws_send_text_now(const char *json) {
-    if (!s_ws || !s_ws_connected || !json) return;
+static bool ws_send_text_now(const char *json) {
+    if (!s_ws || !s_ws_connected || !json) return false;
     const int len = (int)strlen(json);
-    if (len <= 0) return;
-    if (esp_websocket_client_send_text(s_ws, json, len, pdMS_TO_TICKS(1000)) < 0) {
+    if (len <= 0) return false;
+    if (esp_websocket_client_send_text(s_ws, json, len, pdMS_TO_TICKS(1500)) <= 0) {
         ESP_LOGW(TAG, "发送 JSON 失败");
+        return false;
     }
+    return true;
 }
 
-static void ws_send_text(const char *json) {
-    if (!json) return;
+static bool ws_send_text(const char *json) {
+    if (!json) return false;
     const size_t len = strlen(json);
     if (len == 0 || len >= XZ_TX_ITEM_MAX) {
         ESP_LOGW(TAG, "控制消息过长，已丢弃（%u 字节）", (unsigned)len);
-        return;
+        return false;
     }
     // 队列尚未建立时退回同步发送，保证 hello 等关键消息不会消失。
     if (!s_tx_q) {
-        ws_send_text_now(json);
-        return;
+        return ws_send_text_now(json);
     }
     xz_tx_item_t item;
     item.len = (uint16_t)len;
     memcpy(item.data, json, len + 1);
     if (xQueueSend(s_tx_q, &item, 0) != pdTRUE) {
         ESP_LOGW(TAG, "控制消息队列已满，已丢弃");
+        return false;
     }
+    return true;
 }
 
-static void ws_send_binary(const uint8_t *payload, size_t len) {
-    if (!s_ws || !s_ws_connected || !payload || len == 0) return;
-    // 麦克风帧允许丢：socket 半死时最多卡 200 ms，不能拖住音频任务。
-    if (esp_websocket_client_send_bin(s_ws, (const char *)payload, (int)len,
-                                     pdMS_TO_TICKS(200)) < 0) {
-        ESP_LOGW(TAG, "发送二进制帧失败");
+static void log_ws_tx_drop(const char *reason, int err_code) {
+    ++s_ws_tx_drop_count;
+    const int64_t now_us = esp_timer_get_time();
+    if (s_ws_tx_drop_log_us != 0 && now_us - s_ws_tx_drop_log_us < 1000000LL) {
+        return;
     }
+    s_ws_tx_drop_log_us = now_us;
+    wifi_ap_record_t ap;
+    int rssi = 0;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        rssi = ap.rssi;
+    }
+    ESP_LOGW(TAG, "上行拥塞丢弃麦克风帧（%s=%d，累计丢=%u，堆=%u，最大块=%u，RSSI=%d dBm）",
+             reason, err_code, (unsigned)s_ws_tx_drop_count,
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+             rssi);
+}
+
+static bool ws_send_binary(const uint8_t *payload, size_t len) {
+    if (!s_ws || !s_ws_connected || !payload || len == 0) return false;
+    // lwIP tcp_write 从系统堆分配发送缓冲；已启用 1/4 MSS (360B)，单帧仅需 ~460B。
+    // 仅在堆极度紧张时先丢弃这一帧语音，防止在阻塞 socket 上触发 ERR_MEM。
+    const size_t free_heap = esp_get_free_heap_size();
+    const size_t max_blk = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (free_heap < 2560 || max_blk < 1024) {
+        log_ws_tx_drop("低堆内存", (int)max_blk);
+        return false;
+    }
+    // esp_websocket_client 在 transport_poll_write 超时后会直接 abort 断开整条连接：
+    // 先对底层 socket 做短时非阻塞可写预检；拥塞期安全丢弃本帧 60 ms 语音，避免整条会话掉线。
+    if (s_ws_trans) {
+        const int fd = esp_transport_get_socket(s_ws_trans);
+        if (fd < 0 || fd >= FD_SETSIZE) {
+            log_ws_tx_drop("fd", fd);
+            return false;
+        }
+        fd_set writeset;
+        fd_set errset;
+        FD_ZERO(&writeset);
+        FD_ZERO(&errset);
+        FD_SET(fd, &writeset);
+        FD_SET(fd, &errset);
+        struct timeval tv = {.tv_sec = 0, .tv_usec = 35000};
+        const int sel = select(fd + 1, NULL, &writeset, &errset, &tv);
+        if (sel == 0) {
+            log_ws_tx_drop("写阻塞", 0);
+            return false;
+        }
+        if (sel < 0) {
+            log_ws_tx_drop("select", errno);
+            return false;
+        }
+        if (FD_ISSET(fd, &errset)) {
+            int sock_err = 0;
+            socklen_t optlen = sizeof(sock_err);
+            (void)getsockopt(fd, SOL_SOCKET, SO_ERROR, &sock_err, &optlen);
+            log_ws_tx_drop("SO_ERROR", sock_err);
+            return false;
+        }
+    }
+    if (!s_ws || !s_ws_connected) return false;
+    if (esp_websocket_client_send_bin(s_ws, (const char *)payload, (int)len,
+                                      pdMS_TO_TICKS(1500)) <= 0) {
+        ESP_LOGW(TAG, "发送二进制帧失败");
+        return false;
+    }
+    return true;
 }
 
 static void state_lock(void) {
@@ -368,19 +450,19 @@ static void send_hello(void);
 /* 服务端 hello 丢包保护：连上 5 秒还没 session_id 就重发一次 hello，
  * 每 3 秒重试，最多 4 次。实测偶发握手成功但服务端不回 hello，
  * 表现为“连上了但一直不能说话”。 */
-#define XZ_HELLO_GRACE_MS 5000
-#define XZ_HELLO_RETRY_MS 3000
+#define XZ_HELLO_GRACE_MS 2500
+#define XZ_HELLO_RETRY_MS 2000
 #define XZ_HELLO_RETRY_MAX 4
-/* 连接断开后多久仍连不上就整会话重建（自动重连间隔是 10 秒）。 */
+/* 连接断开后多久仍连不上就整会话重建（自动重连间隔是 2 秒）。 */
 #define XZ_DOWN_GRACE_MS 25000
 static TickType_t s_hello_retry_at;
 static int s_hello_retries;
+static TickType_t s_down_since;
 /* hello 看门狗请求整会话重启：由应用层在安全上下文执行。 */
 static volatile bool s_session_restart;
 #define xz_session_restart_requested s_session_restart
 
 static void session_watchdog(void) {
-    static TickType_t s_down_since;
     const TickType_t now = xTaskGetTickCount();
     if (!s_ws_connected) {
         s_hello_retry_at = 0;
@@ -495,15 +577,15 @@ static void send_pending_prompt(void) {
     s_awaiting_tts = true;
     state_unlock();
 
-    // 含中文的提示词上限 16 字；纯英文例句可稍长，JSON 留到 384 字节。
-    char json[384];
+    // 含中文的提示词上限 16 字；纯英文例句可稍长，JSON 留到 256 字节。
+    char json[256];
     snprintf(json, sizeof(json),
              "{\"session_id\":\"%.40s\",\"type\":\"listen\",\"state\":\"detect\","
              "\"text\":\"%s\"}",
              sid, prompt);
     const int sent = esp_websocket_client_send_text(s_ws, json, (int)strlen(json),
-                                                   pdMS_TO_TICKS(300));
-    if (sent < 0) {
+                                                   pdMS_TO_TICKS(1500));
+    if (sent <= 0) {
         state_lock();
         if (s_prompt_seq == seq) {
             s_pending_prompt_valid = true;
@@ -524,9 +606,9 @@ static void xz_tx_task(void *arg) {
         if (s_tx_stop) break;
         if (xQueueReceive(s_tx_q, &s_tx_item, pdMS_TO_TICKS(50)) == pdTRUE) {
             if (s_tx_stop) break;
+            const bool is_listen_start =
+                strstr(s_tx_item.data, "\"state\":\"start\"") != NULL;
             if (s_ws && s_ws_connected) {
-                const bool is_listen_start =
-                    strstr(s_tx_item.data, "\"state\":\"start\"") != NULL;
                 const bool is_listen_stop =
                     strstr(s_tx_item.data, "\"state\":\"stop\"") != NULL;
                 const bool is_abort =
@@ -543,19 +625,27 @@ static void xz_tx_task(void *arg) {
                 // 先把残留麦克风帧编码发完并切回解码模式（释放编码器、重开解码器），
                 // 再向服务端发 listen:stop，避免服务端秒回 TTS 时解码器还没就绪。
                 if (is_listen_stop) {
-                    (void)switch_audio_mode(XZ_AUDIO_DECODE);
+                    (void)switch_audio_mode_timeout(XZ_AUDIO_DECODE, 250);
                     s_awaiting_tts = true;
                 }
                 const int sent = esp_websocket_client_send_text(
-                    s_ws, s_tx_item.data, s_tx_item.len, pdMS_TO_TICKS(300));
-                if (sent < 0) {
+                    s_ws, s_tx_item.data, s_tx_item.len, pdMS_TO_TICKS(1500));
+                if (is_listen_start) {
+                    s_listen_pending = false;
+                    s_listen_pending_until_us = 0;
+                }
+                if (sent <= 0) {
                     if (is_listen_stop) s_awaiting_tts = false;
                     ESP_LOGW(TAG, "发送 JSON 失败（控制队列）");
                 }
-                if (is_abort && sent >= 0) {
-                    // 给服务端一点时间先处理 abort，再发下一题的 detect。
-                    vTaskDelay(pdMS_TO_TICKS(50));
+                if (is_abort && sent > 0) {
+                    // 队列里紧跟 listen:start/detect 时只留短间隔，避免音频首帧积压。
+                    const UBaseType_t queued = s_tx_q ? uxQueueMessagesWaiting(s_tx_q) : 0;
+                    vTaskDelay(pdMS_TO_TICKS(queued > 0 ? 15 : 50));
                 }
+            } else if (is_listen_start) {
+                s_listen_pending = false;
+                s_listen_pending_until_us = 0;
             }
         }
         if (s_tx_stop) break;
@@ -577,7 +667,7 @@ static void xz_tx_task(void *arg) {
 #define XZ_DEC_PCM_BYTES 3072      /* 24 kHz/60 ms 解码输出 2880 B；编码期复用 1920+768=2688 B */
 #define XZ_ENC_OUT_BYTES 768
 #define XZ_OPUS_ITEM_MAX 512
-#define XZ_OPUS_QUEUE_LEN 4
+#define XZ_OPUS_QUEUE_LEN 3
 #define XZ_ENC_QUEUE_LEN 2
 
 static int16_t s_pcm_ring[XZ_PCM_RING_SAMPLES] __attribute__((aligned(4)));
@@ -847,6 +937,14 @@ static void tts_decode_frame(const uint8_t *data, size_t len, uint32_t gen) {
 
 static void encode_one_frame(const int16_t *frame, uint32_t *enc_frames) {
     if (!s_ws_connected || !s_opus_enc || !frame) return;
+    if (s_listen_pending) {
+        const int64_t deadline = s_listen_pending_until_us;
+        if (deadline != 0 && esp_timer_get_time() < deadline) {
+            return;
+        }
+        s_listen_pending = false;
+        s_listen_pending_until_us = 0;
+    }
     uint8_t *const out_buf = s_dec_pcm + XZ_MIC_FRAME_SAMPLES * sizeof(int16_t);
     esp_audio_enc_in_frame_t in = {
         .buffer = (uint8_t *)frame,
@@ -856,10 +954,18 @@ static void encode_one_frame(const int16_t *frame, uint32_t *enc_frames) {
         .buffer = out_buf,
         .len = XZ_ENC_OUT_BYTES,
     };
-    if (esp_audio_enc_process(s_opus_enc, &in, &out) == ESP_AUDIO_ERR_OK &&
-        out.encoded_bytes > 0) {
-        ws_send_binary(out_buf, out.encoded_bytes);
-        ++s_enc_sent;
+    const size_t heap_before = (*enc_frames == 0) ? esp_get_free_heap_size() : 0;
+    const esp_audio_err_t enc_ret = esp_audio_enc_process(s_opus_enc, &in, &out);
+    if (*enc_frames == 0) {
+        ESP_LOGI(TAG, "首帧编码堆: %u -> %u (最大块=%u)",
+                 (unsigned)heap_before,
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    }
+    if (enc_ret == ESP_AUDIO_ERR_OK && out.encoded_bytes > 0) {
+        if (ws_send_binary(out_buf, out.encoded_bytes)) {
+            ++s_enc_sent;
+        }
     }
     const uint32_t n = ++(*enc_frames);
     if (n == 1 || (n & 0x1f) == 0) {
@@ -1079,8 +1185,12 @@ static void send_hello(void) {
              "\"audio_params\":{\"format\":\"opus\",\"sample_rate\":16000,"
              "\"channels\":1,\"frame_duration\":60},"
              "\"features\":{\"mcp\":false,\"aec\":false}}");
-    ws_send_text_now(hello);
-    ESP_LOGI(TAG, "已发送 hello（Opus 16 kHz / 60 ms，堆剩余 %u）",
+    if (s_tx_q && xTaskGetCurrentTaskHandle() != s_tx_task) {
+        ws_send_text(hello);
+    } else {
+        ws_send_text_now(hello);
+    }
+    ESP_LOGI(TAG, "已提交 hello（Opus 16 kHz / 60 ms，堆剩余 %u）",
              (unsigned)esp_get_free_heap_size());
 }
 
@@ -1257,7 +1367,27 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
     switch (event_id) {
     case WEBSOCKET_EVENT_CONNECTED:
         s_ws_connected = true;
-        // 握手完成后再建音频任务与发送任务，避免挤占 TLS 握手内存。
+        s_connect_failed = false;
+        s_force_ota = false;
+        s_retried_ota_this_session = false;
+        // 禁用 Nagle：60 ms Opus 上行每次按 WS 头 + 载荷两次 ssl_write 发出，
+        // 不开 TCP_NODELAY 易与对端延迟 ACK 叠成发送队列积压触发 poll_write 超时断流。
+        if (s_ws_trans) {
+            const int fd = esp_transport_get_socket(s_ws_trans);
+            if (fd >= 0) {
+                int nodelay = 1;
+                if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay)) != 0) {
+                    ESP_LOGW(TAG, "设置 TCP_NODELAY 失败: errno=%d", errno);
+                }
+                // 默认 SO_SNDTIMEO 等于 network_timeout_ms (10s)，阻塞 socket 遇瞬间拥塞会卡死发送锁 10 秒。
+                struct timeval snd_tv = {.tv_sec = 1, .tv_usec = 500000};
+                if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd_tv, sizeof(snd_tv)) != 0) {
+                    ESP_LOGW(TAG, "设置 SO_SNDTIMEO 失败: errno=%d", errno);
+                }
+            }
+        }
+        // 握手完成后再打开解码器、音频任务与发送任务，避免把 mbedTLS MPI 握手内存挤爆（-0x4290）。
+        (void)ensure_decoder();
         (void)ensure_audio_worker();
         if (!ensure_tx_worker()) {
             ESP_LOGW(TAG, "发送任务创建失败，控制消息将走同步发送");
@@ -1268,6 +1398,8 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
         s_ws_connected = false;
+        s_listen_pending = false;
+        s_listen_pending_until_us = 0;
         {
             const bool interrupted = s_tts_active;
             state_lock();
@@ -1279,8 +1411,9 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
             ++s_tts_gen;
             if (s_opus_q) (void)xQueueReset(s_opus_q);
             pcm_ring_reset();
-            // 断线时若还占着 28 KB 编码器，会拖垮重连和下一轮 TTS。
-            (void)switch_audio_mode(XZ_AUDIO_DECODE);
+            // 断线回调可能直接运行在 xz_audio_task 上（send_bin 失败触发 abort），
+            // 此处只能非阻塞置请求位，由 xz_audio_task 自行切回解码模式，避免 1000ms 自死锁。
+            s_audio_req_mode = XZ_AUDIO_DECODE;
             arm_replay_after_disconnect(interrupted);
         }
         ESP_LOGW(TAG, "WebSocket 断开，等待自动重连（任务栈余量 %u 字节）",
@@ -1296,15 +1429,35 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
             ESP_LOGW(TAG, "服务端关闭 WebSocket");
         }
         break;
-    case WEBSOCKET_EVENT_ERROR:
-        ESP_LOGW(TAG, "WebSocket 错误，握手状态码 %d，TLS err=0x%x/%d errno=%d",
-                 data ? data->error_handle.esp_ws_handshake_status_code : 0,
-                 data ? (unsigned)data->error_handle.esp_tls_last_esp_err : 0,
-                 data ? data->error_handle.esp_tls_stack_err : 0,
-                 data ? data->error_handle.esp_transport_sock_errno : 0);
+    case WEBSOCKET_EVENT_ERROR: {
+        const int ws_status = data ? data->error_handle.esp_ws_handshake_status_code : 0;
+        if (data && data->error_handle.error_type == WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT) {
+            ESP_LOGW(TAG, "WebSocket 错误，握手状态码 %d，TLS err=0x%x/%d errno=%d",
+                     ws_status,
+                     (unsigned)data->error_handle.esp_tls_last_esp_err,
+                     data->error_handle.esp_tls_stack_err,
+                     data->error_handle.esp_transport_sock_errno);
+        } else {
+            ESP_LOGW(TAG, "WebSocket 错误，类型 %d 握手状态码 %d: %.*s",
+                     data ? (int)data->error_handle.error_type : -1,
+                     ws_status,
+                     (data && data->data_ptr && data->data_len > 0) ? data->data_len : 0,
+                     (data && data->data_ptr) ? data->data_ptr : "");
+        }
+        if ((ws_status == 401 || ws_status == 403) && !s_retried_ota_this_session) {
+            s_retried_ota_this_session = true;
+            s_force_ota = true;
+            s_session_restart = true;
+            ESP_LOGW(TAG, "WebSocket 鉴权失败(%d)，将重走 OTA 刷新凭证", ws_status);
+        } else if (!s_ws_connected) {
+            s_connect_failed = true;
+        }
         break;
+    }
     case WEBSOCKET_EVENT_CLOSED:
         s_ws_connected = false;
+        s_listen_pending = false;
+        s_listen_pending_until_us = 0;
         {
             const bool interrupted = s_tts_active;
             state_lock();
@@ -1315,16 +1468,20 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
             ++s_tts_gen;
             if (s_opus_q) (void)xQueueReset(s_opus_q);
             pcm_ring_reset();
-            (void)switch_audio_mode(XZ_AUDIO_DECODE);
+            s_audio_req_mode = XZ_AUDIO_DECODE;
             arm_replay_after_disconnect(interrupted);
         }
         ESP_LOGW(TAG, "WebSocket 连接已关闭");
         break;
     case WEBSOCKET_EVENT_FINISH:
-        // 客户端任务退出：自动重连已不可能成功，交给 app 层异步重建。
+        // 客户端任务已经退出：仅在非主动关闭时置位 s_ws_dead，避免 session_stop 后误伤下一次建连。
         s_ws_connected = false;
-        s_ws_dead = true;
-        ESP_LOGW(TAG, "WebSocket 任务已退出，等待重建会话");
+        s_listen_pending = false;
+        s_listen_pending_until_us = 0;
+        if (!s_ws_stopping) {
+            s_ws_dead = true;
+            ESP_LOGW(TAG, "WebSocket 任务已退出，等待重建会话");
+        }
         break;
     default:
         break;
@@ -1350,14 +1507,71 @@ static void arm_replay_after_disconnect(bool interrupted) {
     ESP_LOGW(TAG, "断流后自动重问（重连 hello 后发出）: %.60s", s_last_prompt);
 }
 
+static void ws_release_transports(void) {
+    if (s_ws_trans) {
+        esp_transport_destroy(s_ws_trans);
+        s_ws_trans = NULL;
+    }
+    if (s_ws_base) {
+        esp_transport_destroy(s_ws_base);
+        s_ws_base = NULL;
+    }
+}
+
+static esp_transport_handle_t ws_create_transports(const char *url, const char *headers) {
+    ws_release_transports();
+    if (!url || !url[0]) return NULL;
+
+    const bool is_wss = (strncmp(url, "wss://", 6) == 0);
+    const int default_port = is_wss ? 443 : 80;
+    s_ws_base = is_wss ? esp_transport_ssl_init() : esp_transport_tcp_init();
+    if (!s_ws_base) return NULL;
+    esp_transport_set_default_port(s_ws_base, default_port);
+    if (is_wss) {
+        esp_transport_ssl_crt_bundle_attach(s_ws_base, esp_crt_bundle_attach);
+    }
+
+    s_ws_trans = esp_transport_ws_init(s_ws_base);
+    if (!s_ws_trans) {
+        ws_release_transports();
+        return NULL;
+    }
+    esp_transport_set_default_port(s_ws_trans, default_port);
+
+    const char *scheme_end = strstr(url, "://");
+    const char *authority = scheme_end ? (scheme_end + 3) : url;
+    const char *slash = strchr(authority, '/');
+    const char *query = strchr(authority, '?');
+    char path_buf[96];
+    if (slash) {
+        snprintf(path_buf, sizeof(path_buf), "%s", slash);
+    } else if (query) {
+        snprintf(path_buf, sizeof(path_buf), "/%s", query);
+    } else {
+        snprintf(path_buf, sizeof(path_buf), "/");
+    }
+
+    const esp_transport_ws_config_t ws_cfg = {
+        .ws_path = path_buf,
+        .headers = headers,
+        .propagate_control_frames = true,
+    };
+    if (esp_transport_ws_set_config(s_ws_trans, &ws_cfg) != ESP_OK) {
+        ws_release_transports();
+        return NULL;
+    }
+    return s_ws_trans;
+}
+
 static void ws_start(void) {
     if (s_ws_started || !s_ready) return;
+    s_ws_stopping = false;
+    s_ws_dead = false;
+    s_down_since = 0;
     s_ws_started = true;
 
-    // 解码器在握手前预开：需要 ~9.5 KB 连续块，提前分配避免握手后碎片化。
-    ensure_decoder();
-    // 音频任务与发送任务移至 WEBSOCKET_EVENT_CONNECTED（握手完成）之后创建，
-    // 避免发送任务栈等动态分配与 TLS 握手峰值内存竞争导致 MPI 内存耗尽。
+    // 解码器、音频任务与发送任务统一在 WEBSOCKET_EVENT_CONNECTED（握手完成）之后创建，
+    // 保留尽量多的连续堆内存给 TLS 握手，防止 mbedTLS PK 验证报 0x4290 (MPI alloc failed)。
 
     char mac[24];
     device_mac(mac, sizeof(mac));
@@ -1365,6 +1579,14 @@ static void ws_start(void) {
              "Authorization: Bearer %s\r\nProtocol-Version: 1\r\n"
              "Device-Id: %s\r\nClient-Id: %s\r\n",
              s_token, mac, mac);
+
+    esp_transport_handle_t ext_trans = ws_create_transports(s_ws_url, s_ws_headers);
+    if (!ext_trans) {
+        s_ws_started = false;
+        s_connect_failed = true;
+        ESP_LOGE(TAG, "WebSocket 传输层创建失败");
+        return;
+    }
 
     esp_websocket_client_config_t cfg = {
         .uri = s_ws_url,
@@ -1374,9 +1596,10 @@ static void ws_start(void) {
         // TTS 下行约 4 KB/s，解码/音频任务会把 CPU 占满；
         // 接收任务优先级必须高于它们，否则窗口填满后服务端直接 RST。
         .task_prio = 6,
-        .reconnect_timeout_ms = 10000,
+        .reconnect_timeout_ms = 2000,
         .network_timeout_ms = 10000,
         .crt_bundle_attach = esp_crt_bundle_attach,
+        .ext_transport = ext_trans,
         .disable_auto_reconnect = false,
         // 服务端主动关闭（换会话、长时间空闲）后仍要能连回来；
         // 否则客户端任务直接退出，学生界面会永远停在“小智连接中”。
@@ -1384,7 +1607,9 @@ static void ws_start(void) {
     };
     s_ws = esp_websocket_client_init(&cfg);
     if (!s_ws) {
+        ws_release_transports();
         s_ws_started = false;
+        s_connect_failed = true;
         ESP_LOGE(TAG, "WebSocket 客户端创建失败");
         return;
     }
@@ -1393,7 +1618,9 @@ static void ws_start(void) {
         ESP_LOGE(TAG, "WebSocket 启动失败");
         esp_websocket_client_destroy(s_ws);
         s_ws = NULL;
+        ws_release_transports();
         s_ws_started = false;
+        s_connect_failed = true;
         return;
     }
     ESP_LOGI(TAG, "WebSocket 连接中: %s（堆剩余 %u）", s_ws_url,
@@ -1406,27 +1633,43 @@ static void ota_task(void *arg) {
     char *response = malloc(RESPONSE_MAX);
     if (!response) {
         ESP_LOGE(TAG, "无法分配 OTA 响应缓冲");
+        s_connect_failed = true;
         s_ota_running = false;
         vTaskDelete(NULL);
         return;
     }
     build_body(body, sizeof(body));
 
-    for (int attempt = 0; attempt < 3; ++attempt) {
+    for (int attempt = 0; attempt < 3 && !s_ota_abort; ++attempt) {
         const int status = http_post(body, response, RESPONSE_MAX);
         if (status == 200) {
             parse_response(response);
+            if (s_ready) {
+                s_force_ota = false;
+                break;
+            }
         } else {
             ESP_LOGW(TAG, "OTA 请求失败，状态码 %d，响应: %.300s", status, response);
         }
-        if (s_ready) {
+        if (s_ota_abort) {
             break;
         }
-        vTaskDelay(pdMS_TO_TICKS(ECARD_XIAOZHI_POLL_MS));
+        // 未激活设备需等待用户配对，按 30 秒轮询；若仅网络/TLS 出错，快速重试一次即可上报失败。
+        const uint32_t wait_ms = (s_activation[0] != '\0') ? ECARD_XIAOZHI_POLL_MS : 1000u;
+        if (s_activation[0] == '\0' && attempt >= 1) {
+            break;
+        }
+        for (uint32_t waited = 0; waited < wait_ms && !s_ota_abort; waited += 200u) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
     }
     free(response);
+    const bool start_ws = (s_ready && !s_ota_abort);
+    if (!s_ready && !s_ota_abort) {
+        s_connect_failed = true;
+    }
     s_ota_running = false;
-    if (s_ready) {
+    if (start_ws) {
         ws_start();
     }
     vTaskDelete(NULL);
@@ -1446,7 +1689,7 @@ void ecard_xiaozhi_session_start(void) {
         s_started = true;
         load_settings();
     }
-    // 看门狗判死 / 客户端任务已退出：旧连接还挂着，不能在这里内联重建
+    // 看门狗判死 / 客户端任务已经退出：旧连接还挂着，不能在这里内联重建
     // （会泄漏旧对象，而且这是一条会阻塞的销毁）。只置位，让 app 层走
     // restart_pending() → 异步 session_stop() → session_start()。
     if (s_session_restart || s_ws_dead) {
@@ -1460,19 +1703,33 @@ void ecard_xiaozhi_session_start(void) {
                  (int)s_ws_started, (int)s_ota_running);
         return;
     }
+    s_connect_failed = false;
+    s_ota_abort = false;
     // AI 语音是持续下行流，省电模式会让 DTIM 休眠拖慢接收，长 TTS 容易断流。
     ecard_netlink_set_low_latency(true);
-    // 始终走一次 OTA：上次保存的 token 可能已过期，直接复用会握手失败。
+    // 已有本地缓存的 WS 地址和 token 时直接发起 WebSocket（省去一次 HTTPS/OTA 峰值并提速），
+    // 若遇 401/403 鉴权失败再自动回落到 OTA 刷新凭证。
+    if (s_ready && !s_force_ota) {
+        ws_start();
+        return;
+    }
     s_ota_running = true;
-    if (xTaskCreate(ota_task, "xiaozhi_ota", 4096, NULL, 3, NULL) != pdPASS) {
+    if (xTaskCreate(ota_task, "xiaozhi_ota", 3584, NULL, 3, NULL) != pdPASS) {
         s_ota_running = false;
+        s_connect_failed = true;
         ESP_LOGE(TAG, "OTA 任务创建失败");
     }
 }
 
 void ecard_xiaozhi_session_stop(void) {
+    s_ws_stopping = true;
+    s_ota_abort = true;
+    s_retried_ota_this_session = false;
     s_ws_connected = false;
-    s_ws_dead = false;
+    s_listen_pending = false;
+    s_listen_pending_until_us = 0;
+    s_ws_tx_drop_count = 0;
+    s_ws_tx_drop_log_us = 0;
     s_tx_stop = true;
     for (int i = 0; i < 50 && s_tx_task && !s_tx_done; ++i) {
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -1489,7 +1746,13 @@ void ecard_xiaozhi_session_stop(void) {
         esp_websocket_client_destroy(s_ws);
         s_ws = NULL;
     }
+    ws_release_transports();
     s_ws_started = false;
+    s_ws_dead = false;
+    s_session_restart = false;
+    s_connect_failed = false;
+    s_down_since = 0;
+    s_ws_stopping = false;
     state_lock();
     ++s_prompt_seq;
     s_session_id[0] = '\0';
@@ -1635,9 +1898,17 @@ static void release_audio_worker(void) {
     ++s_tts_gen;
 }
 
-static bool switch_audio_mode(xz_audio_mode_t target) {
+static bool switch_audio_mode_timeout(xz_audio_mode_t target, uint32_t wait_ms) {
+    if (xTaskGetCurrentTaskHandle() == s_audio_task) {
+        s_audio_req_mode = target;
+        return (s_audio_mode == target);
+    }
     if (!s_audio_ctrl_lock || !s_audio_ack_sem) return false;
-    xSemaphoreTake(s_audio_ctrl_lock, portMAX_DELAY);
+    if (xSemaphoreTake(s_audio_ctrl_lock, pdMS_TO_TICKS(wait_ms)) != pdTRUE) {
+        ESP_LOGW(TAG, "音频模式切换抢锁超时（目标=%d，当前=%d）",
+                 (int)target, (int)s_audio_mode);
+        return false;
+    }
     if (!s_audio_task || s_audio_stop || s_audio_done) {
         xSemaphoreGive(s_audio_ctrl_lock);
         return false;
@@ -1650,7 +1921,7 @@ static bool switch_audio_mode(xz_audio_mode_t target) {
     s_audio_switch_ok = false;
     s_audio_req_mode = target;
     bool ok = false;
-    if (xSemaphoreTake(s_audio_ack_sem, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    if (xSemaphoreTake(s_audio_ack_sem, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
         ok = s_audio_switch_ok;
     } else {
         ESP_LOGW(TAG, "音频模式切换超时（目标=%d，当前=%d）",
@@ -1658,6 +1929,10 @@ static bool switch_audio_mode(xz_audio_mode_t target) {
     }
     xSemaphoreGive(s_audio_ctrl_lock);
     return ok;
+}
+
+static bool switch_audio_mode(xz_audio_mode_t target) {
+    return switch_audio_mode_timeout(target, 3500);
 }
 
 bool ecard_xiaozhi_listen_start(void) {
@@ -1668,9 +1943,15 @@ bool ecard_xiaozhi_listen_start(void) {
     state_unlock();
     if (!sid[0]) return false;
 
-    // 开始录音前：中止上一轮回答，并让 22 KB 静态音频任务原地切到 Opus 编码模式。
+    // 开始录音前：中止上一轮回答，并让 28 KB 静态音频任务原地切到 Opus 编码模式。
+    // 在 xz_tx_task 真正发出 listen:start 之前先暂扣二进制语音帧（最多 450 ms 兜底放行），
+    // 避免首帧早于 listen:start 到达服务端，也防止 TX 拥堵时整段录音被扣成空帧。
     abort_tts_inline(sid);
+    s_listen_pending = (s_tx_q != NULL);
+    s_listen_pending_until_us = s_listen_pending ? (esp_timer_get_time() + 450000LL) : 0;
     if (!switch_audio_mode(XZ_AUDIO_ENCODE)) {
+        s_listen_pending = false;
+        s_listen_pending_until_us = 0;
         ESP_LOGW(TAG, "追问启动失败：Opus 编码器无法打开（堆 %u，最大连续块 %u）",
                  (unsigned)esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
@@ -1686,7 +1967,12 @@ bool ecard_xiaozhi_listen_start(void) {
     s_last_llm[0] = '\0';
     s_tts_audio_bytes = 0;
     s_enc_sent = 0;
-    ws_send_text(json);
+    s_ws_tx_drop_count = 0;
+    s_ws_tx_drop_log_us = 0;
+    if (!ws_send_text(json) || !s_tx_q) {
+        s_listen_pending = false;
+        s_listen_pending_until_us = 0;
+    }
     ESP_LOGI(TAG, "listen start（手动模式）");
     return true;
 }
@@ -1717,6 +2003,14 @@ void ecard_xiaozhi_send_audio(const uint8_t *opus, size_t len) {
 
 bool ecard_xiaozhi_ws_connected(void) {
     return s_ws_connected;
+}
+
+bool ecard_xiaozhi_is_busy(void) {
+    return s_ota_running || s_ws_started || s_ws_connected;
+}
+
+bool ecard_xiaozhi_connect_failed(void) {
+    return s_connect_failed;
 }
 
 /** 会话期间每 5 秒打印一次音频收发/内存快照，用于定位“断流”发生在哪一侧。 */

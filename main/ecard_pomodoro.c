@@ -7,6 +7,7 @@ static uint32_t s_remaining_ms;
 static uint32_t s_phase_total_ms;
 static uint8_t s_completed;
 static uint8_t s_focus_min = ECARD_POMODORO_FOCUS_MIN;
+static uint8_t s_pending_completed_focus_min;
 
 static uint32_t phase_ms(ecard_pomodoro_phase_t phase) {
     switch (phase) {
@@ -37,6 +38,7 @@ void ecard_pomodoro_reset(void) {
     s_remaining_ms = 0;
     s_phase_total_ms = phase_ms(ECARD_POMODORO_FOCUS);
     s_completed = 0;
+    s_pending_completed_focus_min = 0;
 }
 
 void ecard_pomodoro_start(void) {
@@ -63,6 +65,7 @@ void ecard_pomodoro_stop(void) {
     s_phase = ECARD_POMODORO_IDLE;
     s_remaining_ms = 0;
     s_phase_total_ms = phase_ms(ECARD_POMODORO_FOCUS);
+    s_pending_completed_focus_min = 0;
 }
 
 void ecard_pomodoro_tick(uint32_t delta_ms) {
@@ -72,6 +75,7 @@ void ecard_pomodoro_tick(uint32_t delta_ms) {
         if (s_remaining_ms == 0) {
             if (s_phase == ECARD_POMODORO_FOCUS) {
                 ++s_completed;
+                s_pending_completed_focus_min = s_focus_min;
                 if (s_completed % ECARD_POMODORO_CYCLES_BEFORE_LONG == 0) {
                     enter_phase(ECARD_POMODORO_LONG_BREAK);
                 } else {
@@ -146,4 +150,10 @@ uint8_t ecard_pomodoro_completed(void) {
 
 uint32_t ecard_pomodoro_phase_total_ms(void) {
     return s_phase_total_ms;
+}
+
+uint8_t ecard_pomodoro_take_completed_focus_minutes(void) {
+    const uint8_t mins = s_pending_completed_focus_min;
+    s_pending_completed_focus_min = 0;
+    return mins;
 }

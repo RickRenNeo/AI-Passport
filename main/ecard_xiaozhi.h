@@ -34,6 +34,12 @@ const char *ecard_xiaozhi_websocket_url(void);
 /** WebSocket 是否已连接（hello 已发出）。 */
 bool ecard_xiaozhi_ws_connected(void);
 
+/** 小智是否正处于连接、OTA 激活或活跃会话期（此时应让出堆和网络带宽）。 */
+bool ecard_xiaozhi_is_busy(void);
+
+/** 本轮会话连接或激活是否已明确失败。 */
+bool ecard_xiaozhi_connect_failed(void);
+
 /** 是否已收到服务端 hello 的 session_id，可以安全开始 listen/detect。 */
 bool ecard_xiaozhi_session_ready(void);
 

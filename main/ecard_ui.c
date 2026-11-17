@@ -1,16 +1,22 @@
 #include "ecard_ui.h"
 #include "ecard_barcode.h"
 #include "ecard_cards.h"
+#include "ecard_cat_room.h"
 #include "ecard_flashcard.h"
+#include "ecard_lan_http.h"
 #include "ecard_messages.h"
 #include "ecard_netlink.h"
 #include "ecard_pomodoro.h"
 #include "ecard_portal.h"
+#include "ecard_qr.h"
 #include "ecard_quiz.h"
 #include "ecard_setup.h"
 #include "ecard_voice.h"
 #include <stdio.h>
 #include <string.h>
+#if defined(ESP_PLATFORM)
+#include <esp_mac.h>
+#endif
 
 #if defined(ESP_PLATFORM) || defined(LV_CONF_INCLUDE_SIMPLE) || defined(LV_LVGL_H_INCLUDE_SIMPLE)
 #include "lvgl.h"
@@ -25,6 +31,7 @@ typedef struct lv_font_t lv_font_t;
 /* 设计基线                                                                  */
 /* ------------------------------------------------------------------------- */
 
+#define ECARD_DIM_TIMEOUT_MS  (60 * 1000)
 #define ECARD_IDLE_TIMEOUT_MS (120 * 1000)
 
 #define C_BG        0xEDF3F9
@@ -60,6 +67,7 @@ static uint8_t s_grade_selection = 0;
 static uint8_t s_deck_grade = 1;
 static uint32_t s_idle_elapsed_ms = 0;
 static bool s_is_dimmed = false;
+static bool s_screen_off = false;
 static char s_time_str[8] = "09:40";
 static int s_battery_pct = -1;
 static bool s_is_charging = false;
@@ -71,6 +79,20 @@ static bool s_ai_connected = false;
 static bool s_net_retrying = false;
 static ecard_message_t s_playing_msg;
 static bool s_has_playing_msg = false;
+static char s_pomo_override_hint[64] = {0};
+static uint32_t s_pomo_hint_ttl_ms = 0;
+static bool s_pomo_hint_persistent = false;
+
+void ecard_ui_format_pomodoro_points(char *out, size_t out_size) {
+    if (!out || out_size == 0) return;
+    uint16_t avail = ecard_cat_room_available_points();
+    if (avail > ECARD_CAT_ROOM_MAX_POINTS) avail = ECARD_CAT_ROOM_MAX_POINTS;
+    snprintf(out, out_size, "可用积分：%u", (unsigned)avail);
+}
+
+const char *ecard_ui_pomodoro_redeem_reminder(void) {
+    return "攒够积分找家长\n小程序里兑奖励";
+}
 
 #if HAS_LVGL_RUNTIME
 
@@ -80,6 +102,7 @@ LV_FONT_DECLARE(ecard_font_16);
 LV_FONT_DECLARE(ecard_font_22);
 LV_FONT_DECLARE(ecard_font_48);
 
+#include "ecard_cat_sprites.h"
 #include "ecard_photo.h"
 
 static lv_obj_t *s_screen = NULL;
@@ -115,15 +138,23 @@ static lv_obj_t *s_msg_list = NULL;
 static lv_obj_t *s_msg_empty_panel = NULL;
 static lv_obj_t *s_msg_rows[ECARD_MESSAGES_MAX];
 
-/* 设备 */
+/* 设备与配对 */
 static lv_obj_t *s_lbl_dev_battery = NULL;
 static lv_obj_t *s_bar_dev_battery = NULL;
 static lv_obj_t *s_lbl_dev_network = NULL;
 static lv_obj_t *s_lbl_dev_storage = NULL;
+static lv_obj_t *s_lbl_dev_pair = NULL;
 static lv_obj_t *s_dev_note = NULL;
 static lv_obj_t *s_dev_note_badge = NULL;
 static lv_obj_t *s_lbl_dev_note_title = NULL;
 static lv_obj_t *s_lbl_dev_note_sub = NULL;
+static lv_obj_t *s_pair_qr = NULL;
+static lv_obj_t *s_pair_code_lbl = NULL;
+static lv_obj_t *s_pair_status_lbl = NULL;
+static lv_obj_t *s_pair_ip_lbl = NULL;
+static uint8_t s_pair_qr_bits[ECARD_QR_PACKED_BYTES];
+static int s_pair_qr_size = 0;
+static char s_pair_qr_payload[160] = {0};
 
 /* 首次配网：记录当前渲染的阶段，状态变化时整页重绘。 */
 static int s_setup_stage = -999;
@@ -150,12 +181,29 @@ static lv_obj_t *s_grade_glyphs[ECARD_GRADE_COUNT];
 static lv_obj_t *s_grade_titles[ECARD_GRADE_COUNT];
 static lv_obj_t *s_grade_subs[ECARD_GRADE_COUNT];
 
-/* 番茄钟 */
+/* 番茄钟小猫书房 */
 static lv_obj_t *s_pomo_phase = NULL;
+static lv_obj_t *s_pomo_phase_pill = NULL;
+static lv_obj_t *s_pomo_pts_pill = NULL;
+static lv_obj_t *s_pomo_pts = NULL;
 static lv_obj_t *s_pomo_time = NULL;
 static lv_obj_t *s_pomo_bar = NULL;
-static lv_obj_t *s_pomo_round = NULL;
 static lv_obj_t *s_pomo_tip = NULL;
+static lv_obj_t *s_pomo_stage = NULL;
+static lv_obj_t *s_pomo_lamp_glow = NULL;
+static lv_obj_t *s_pomo_img_rug = NULL;
+static lv_obj_t *s_pomo_img_wdecor = NULL;
+static lv_obj_t *s_pomo_img_chair = NULL;
+static lv_obj_t *s_pomo_img_lamp = NULL;
+static lv_obj_t *s_pomo_img_desk = NULL;
+static lv_obj_t *s_pomo_img_cat = NULL;
+static lv_timer_t *s_pomo_anim_timer = NULL;
+static uint8_t s_pomo_anim_frame = 0;
+static uint8_t s_pomo_cached_slots[ECARD_ROOM_SLOT_COUNT];
+static uint8_t s_pomo_cached_phase = 0xFF;
+static uint8_t s_pomo_cached_glow = 0xFF;
+static int32_t s_pomo_cached_bar_w = -1;
+static const lv_image_dsc_t *s_pomo_cached_cat = NULL;
 
 /* 闪卡 */
 static lv_obj_t *s_fc_body = NULL;
@@ -397,10 +445,15 @@ static void reset_page_pointers(void) {
     s_bar_dev_battery = NULL;
     s_lbl_dev_network = NULL;
     s_lbl_dev_storage = NULL;
+    s_lbl_dev_pair = NULL;
     s_dev_note = NULL;
     s_dev_note_badge = NULL;
     s_lbl_dev_note_title = NULL;
     s_lbl_dev_note_sub = NULL;
+    s_pair_qr = NULL;
+    s_pair_code_lbl = NULL;
+    s_pair_status_lbl = NULL;
+    s_pair_ip_lbl = NULL;
     s_quiz_body = NULL;
     s_quiz_result = NULL;
     s_lbl_quiz_progress = NULL;
@@ -434,11 +487,31 @@ static void reset_page_pointers(void) {
     s_lbl_fc_explain = NULL;
     s_lbl_fc_example = NULL;
     s_lbl_fc_example_cn = NULL;
+    if (s_pomo_anim_timer) {
+        lv_timer_delete(s_pomo_anim_timer);
+        s_pomo_anim_timer = NULL;
+    }
+    s_pomo_anim_frame = 0;
+    memset(s_pomo_cached_slots, 0xFF, sizeof(s_pomo_cached_slots));
+    s_pomo_cached_phase = 0xFF;
+    s_pomo_cached_glow = 0xFF;
+    s_pomo_cached_bar_w = -1;
+    s_pomo_cached_cat = NULL;
     s_pomo_phase = NULL;
+    s_pomo_phase_pill = NULL;
+    s_pomo_pts_pill = NULL;
+    s_pomo_pts = NULL;
     s_pomo_time = NULL;
     s_pomo_bar = NULL;
-    s_pomo_round = NULL;
     s_pomo_tip = NULL;
+    s_pomo_stage = NULL;
+    s_pomo_lamp_glow = NULL;
+    s_pomo_img_rug = NULL;
+    s_pomo_img_wdecor = NULL;
+    s_pomo_img_chair = NULL;
+    s_pomo_img_lamp = NULL;
+    s_pomo_img_desk = NULL;
+    s_pomo_img_cat = NULL;
     s_modal_container = NULL;
     s_lbl_modal_big = NULL;
     s_lbl_modal_kicker = NULL;
@@ -912,36 +985,165 @@ static void update_quiz_content(void) {
 }
 
 /* ------------------------------------------------------------------------- */
-/* 番茄钟                                                                    */
+/* 番茄钟小猫书房（方案 A：书桌小猫陪读）                                    */
 /* ------------------------------------------------------------------------- */
 
 static void update_pomodoro_content(void);
 
+static const lv_image_dsc_t *pomodoro_cat_sprite(void) {
+    const ecard_pomodoro_phase_t phase = ecard_pomodoro_phase();
+    switch (phase) {
+    case ECARD_POMODORO_FOCUS:
+        if (!ecard_pomodoro_is_running()) {
+            return &ecard_cat_pose_paused;
+        }
+        return ecard_cat_focus_frames[s_pomo_anim_frame & 3u];
+    case ECARD_POMODORO_BREAK:
+    case ECARD_POMODORO_LONG_BREAK:
+        return &ecard_cat_pose_break;
+    case ECARD_POMODORO_DONE:
+        return &ecard_cat_pose_done;
+    default:
+        return &ecard_cat_pose_idle;
+    }
+}
+
+static void apply_pomodoro_cat_frame(void) {
+    if (!s_pomo_img_cat) return;
+    const lv_image_dsc_t *src = pomodoro_cat_sprite();
+    if (src != s_pomo_cached_cat) {
+        s_pomo_cached_cat = src;
+        lv_image_set_src(s_pomo_img_cat, src);
+    }
+}
+
+static void pomo_anim_cb(lv_timer_t *timer) {
+    (void)timer;
+    if (s_page != ECARD_UI_PAGE_POMODORO || !s_pomo_img_cat) return;
+    if (ecard_pomodoro_phase() == ECARD_POMODORO_FOCUS &&
+        ecard_pomodoro_is_running()) {
+        s_pomo_anim_frame = (uint8_t)((s_pomo_anim_frame + 1u) & 3u);
+    } else {
+        s_pomo_anim_frame = 0;
+    }
+    apply_pomodoro_cat_frame();
+}
+
+static uint32_t room_wall_color(uint8_t variant) {
+    switch (variant) {
+    case 1: return 0xEAF4FF; /* 星空蓝墙（顶） */
+    case 2: return 0xFFF3F7; /* 樱花粉墙（顶） */
+    case 3: return 0xECF6F0; /* 森林绿墙（顶） */
+    default: return 0xFFFDF8; /* 暖杏素墙（顶） */
+    }
+}
+
+static uint32_t room_wall_grad_color(uint8_t variant) {
+    switch (variant) {
+    case 1: return 0xCFE5FA; /* 星空蓝墙（底） */
+    case 2: return 0xF9DAE6; /* 樱花粉墙（底） */
+    case 3: return 0xD5EAE0; /* 森林绿墙（底） */
+    default: return 0xF6E8D7; /* 暖杏素墙（底） */
+    }
+}
+
 static void create_pomodoro_page(void) {
     s_screen = create_page_root();
-    create_page_header(s_screen, "番茄钟", "选时长 · 最长 50 分钟");
+    create_status_bar(s_screen);
 
-    lv_obj_t *card = make_box(s_screen, 16, 66, 208, 224, C_SURFACE, C_LINE, 18);
-
-    s_pomo_phase = make_label(card, "", &ecard_font_16, C_BLUE, 0, 16, 208,
+    /* 顶部状态卡：首行左右排布阶段胶囊与 9999 可用积分胶囊，次行左侧 48px 倒计时 + 右侧双行兑奖提示，底行进度条 */
+    lv_obj_t *top = make_box(s_screen, 10, 22, 220, 73, C_SURFACE, C_LINE, 14);
+    s_pomo_phase_pill = make_box(top, 8, 5, 68, 18, C_LINE, NO_BORDER, 9);
+    s_pomo_phase = make_label(s_pomo_phase_pill, "", &ecard_font_12, C_MUTED, 0, 2, 68,
                               LV_TEXT_ALIGN_CENTER);
-    s_pomo_time = make_label(card, "25:00", &ecard_font_48, C_NAVY, 0, 44, 208,
-                             LV_TEXT_ALIGN_CENTER);
-    lv_obj_t *bar_bg = make_box(card, 12, 108, 184, 6, C_LINE, NO_BORDER, 3);
-    s_pomo_bar = make_box(bar_bg, 0, 0, 0, 6, C_BLUE, NO_BORDER, 3);
-    s_pomo_round = make_label(card, "", &ecard_font_12, C_MUTED, 0, 124, 208,
-                              LV_TEXT_ALIGN_CENTER);
-    s_pomo_tip = make_wrapped_label(card, "", &ecard_font_16, C_INK, 16, 158, 176, 52,
-                                    LV_TEXT_ALIGN_CENTER);
+    s_pomo_pts_pill = make_box(top, 114, 5, 98, 18, C_AMBER_BG, NO_BORDER, 9);
+    s_pomo_pts = make_label(s_pomo_pts_pill, "", &ecard_font_12, 0xB45309, 0, 2, 98,
+                            LV_TEXT_ALIGN_CENTER);
 
-    create_page_hint(s_screen, "OK 开始/暂停 · DOWN 结束 · 长按退出");
+    s_pomo_time = make_label(top, "25:00", &ecard_font_48, C_NAVY, 7, 19, 118,
+                             LV_TEXT_ALIGN_LEFT);
+    lv_obj_set_style_text_letter_space(s_pomo_time, -1, 0);
+
+    lv_obj_t *lbl_redeem = make_label(top, ecard_ui_pomodoro_redeem_reminder(),
+                                      &ecard_font_12, 0xB45309, 126, 30, 86,
+                                      LV_TEXT_ALIGN_RIGHT);
+    lv_obj_set_style_text_line_space(lbl_redeem, 2, 0);
+
+    lv_obj_t *bar_bg = make_box(top, 8, 66, 204, 4, C_LINE, NO_BORDER, 2);
+    s_pomo_bar = make_box(bar_bg, 0, 0, 0, 4, C_BLUE, NO_BORDER, 2);
+
+    /* 现代潮玩治愈系小猫书房舞台 (220x173) */
+    s_pomo_stage = make_box(s_screen, 10, 98, 220, 173, 0xFFFDF8, C_LINE, 16);
+    lv_obj_set_style_bg_grad_color(s_pomo_stage, lv_color_hex(0xF6E8D7), 0);
+    lv_obj_set_style_bg_grad_dir(s_pomo_stage, LV_GRAD_DIR_VER, 0);
+
+    /* 墙脚踢脚线 + 暖木渐变地板 */
+    make_box(s_pomo_stage, 1, 112, 218, 5, 0xFFFBF5, NO_BORDER, 0);
+    make_box(s_pomo_stage, 1, 117, 218, 2, 0xDFCBB3, NO_BORDER, 0);
+    lv_obj_t *floor_bg = make_box(s_pomo_stage, 1, 119, 218, 53, 0xF3DFC8, NO_BORDER, 14);
+    lv_obj_set_style_bg_grad_color(floor_bg, lv_color_hex(0xDFBF9C), 0);
+    lv_obj_set_style_bg_grad_dir(floor_bg, LV_GRAD_DIR_VER, 0);
+    make_box(s_pomo_stage, 1, 119, 218, 16, 0xF3DFC8, NO_BORDER, 0); /* 保持地板上沿平直 */
+
+    /* 木地板细缝与家具柔和环境阴影 */
+    for (int fy = 133; fy <= 163; fy += 15) {
+        lv_obj_t *seam = make_box(s_pomo_stage, 2, fy, 216, 1, 0xCEAA82, NO_BORDER, 0);
+        lv_obj_set_style_bg_opa(seam, LV_OPA_30, 0);
+    }
+    lv_obj_t *amb_sh = make_box(s_pomo_stage, 24, 131, 172, 12, 0x8F6B4B, NO_BORDER, 6);
+    lv_obj_set_style_bg_opa(amb_sh, LV_OPA_10, 0);
+
+    s_pomo_img_rug = lv_image_create(s_pomo_stage);
+    lv_obj_set_pos(s_pomo_img_rug, 40, 141);
+    lv_obj_clear_flag(s_pomo_img_rug, LV_OBJ_FLAG_CLICKABLE);
+
+    s_pomo_img_wdecor = lv_image_create(s_pomo_stage);
+    lv_obj_set_pos(s_pomo_img_wdecor, 12, 6);
+    lv_obj_clear_flag(s_pomo_img_wdecor, LV_OBJ_FLAG_CLICKABLE);
+
+    s_pomo_lamp_glow = lv_image_create(s_pomo_stage);
+    lv_image_set_src(s_pomo_lamp_glow, &ecard_lamp_glow);
+    lv_obj_set_pos(s_pomo_lamp_glow, 130, 32);
+    lv_obj_clear_flag(s_pomo_lamp_glow, LV_OBJ_FLAG_CLICKABLE);
+
+    s_pomo_img_chair = lv_image_create(s_pomo_stage);
+    lv_obj_set_pos(s_pomo_img_chair, 72, 71);
+    lv_obj_clear_flag(s_pomo_img_chair, LV_OBJ_FLAG_CLICKABLE);
+
+    /* 现代圆润原木书桌 (3D 精灵) */
+    lv_obj_t *desk_table = lv_image_create(s_pomo_stage);
+    lv_image_set_src(desk_table, &ecard_desk_table);
+    lv_obj_set_pos(desk_table, 12, 95);
+    lv_obj_clear_flag(desk_table, LV_OBJ_FLAG_CLICKABLE);
+
+    s_pomo_img_desk = lv_image_create(s_pomo_stage);
+    lv_obj_set_pos(s_pomo_img_desk, 20, 64);
+    lv_obj_clear_flag(s_pomo_img_desk, LV_OBJ_FLAG_CLICKABLE);
+
+    s_pomo_img_lamp = lv_image_create(s_pomo_stage);
+    lv_obj_set_pos(s_pomo_img_lamp, 152, 51);
+    lv_obj_clear_flag(s_pomo_img_lamp, LV_OBJ_FLAG_CLICKABLE);
+
+    s_pomo_img_cat = lv_image_create(s_pomo_stage);
+    lv_obj_set_pos(s_pomo_img_cat, 68, 33);
+    lv_obj_clear_flag(s_pomo_img_cat, LV_OBJ_FLAG_CLICKABLE);
+
+    /* 舞台下方陪伴提示条 */
+    lv_obj_t *tip_box = make_box(s_screen, 10, 274, 220, 24, C_SURFACE, C_LINE, 12);
+    s_pomo_tip = make_label(tip_box, "", &ecard_font_12, C_INK, 8, 5, 204,
+                            LV_TEXT_ALIGN_CENTER);
+
+    create_page_hint(s_screen, "OK 开始 · UP+5 · DOWN-5 · 长按菜单");
+
+    s_pomo_anim_frame = 0;
+    s_pomo_anim_timer = lv_timer_create(pomo_anim_cb, 500, NULL);
     update_pomodoro_content();
 }
 
 static const char *pomodoro_phase_text(ecard_pomodoro_phase_t phase) {
     switch (phase) {
     case ECARD_POMODORO_FOCUS:
-        return "专注中";
+        return ecard_pomodoro_is_running() ? "专注中" : "已暂停";
     case ECARD_POMODORO_BREAK:
         return "休息一下";
     case ECARD_POMODORO_LONG_BREAK:
@@ -957,9 +1159,9 @@ static void update_pomodoro_content(void) {
     if (!s_pomo_time) return;
 
     const ecard_pomodoro_phase_t phase = ecard_pomodoro_phase();
+    const bool running = ecard_pomodoro_is_running();
+    const bool idle = (phase == ECARD_POMODORO_IDLE || phase == ECARD_POMODORO_DONE);
     const uint32_t total = ecard_pomodoro_phase_total_ms();
-    uint32_t remaining = ecard_pomodoro_remaining_ms();
-    if (remaining == 0 && total > 0) remaining = total;
 
     char buf[32];
     const uint32_t sec = (phase == ECARD_POMODORO_IDLE)
@@ -970,33 +1172,131 @@ static void update_pomodoro_content(void) {
     label_set_text(s_pomo_phase, pomodoro_phase_text(phase));
 
     int32_t done_w = 0;
-    if (total > 0) {
-        done_w = (int32_t)((uint64_t)184 * (total - remaining) / total);
+    if (phase == ECARD_POMODORO_DONE) {
+        done_w = 204;
+    } else if (phase != ECARD_POMODORO_IDLE && total > 0) {
+        uint32_t rem = ecard_pomodoro_remaining_ms();
+        if (rem > total) rem = total;
+        done_w = (int32_t)((uint64_t)204 * (total - rem) / total);
     }
-    lv_obj_set_width(s_pomo_bar, done_w);
+    if (done_w != s_pomo_cached_bar_w) {
+        s_pomo_cached_bar_w = done_w;
+        lv_obj_set_width(s_pomo_bar, done_w);
+    }
 
-    char round[40];
-    snprintf(round, sizeof(round), "已完成 %u 轮 · 第 %u 轮",
-             (unsigned)ecard_pomodoro_completed(),
-             (unsigned)(ecard_pomodoro_completed() + 1));
-    label_set_text(s_pomo_round, round);
+    char pts[32];
+    ecard_ui_format_pomodoro_points(pts, sizeof(pts));
+    if (s_pomo_pts) label_set_text(s_pomo_pts, pts);
 
-    char idle_tip[72];
-    snprintf(idle_tip, sizeof(idle_tip), "UP +5 分 · DOWN -5 分\nOK 开始 %u 分钟",
+    /* 同步 6 个房间装修槽位精灵（仅变化时更新 LVGL 属性） */
+    if (s_pomo_stage) {
+        const uint8_t wall_v = ecard_cat_room_equipped(ECARD_ROOM_SLOT_WALL);
+        if (s_pomo_cached_slots[ECARD_ROOM_SLOT_WALL] != wall_v) {
+            s_pomo_cached_slots[ECARD_ROOM_SLOT_WALL] = wall_v;
+            lv_obj_set_style_bg_color(s_pomo_stage, lv_color_hex(room_wall_color(wall_v)), 0);
+            lv_obj_set_style_bg_grad_color(
+                s_pomo_stage, lv_color_hex(room_wall_grad_color(wall_v)), 0);
+        }
+    }
+    if (s_pomo_img_wdecor) {
+        const uint8_t v = ecard_cat_room_equipped(ECARD_ROOM_SLOT_WALL_DECOR);
+        if (s_pomo_cached_slots[ECARD_ROOM_SLOT_WALL_DECOR] != v) {
+            s_pomo_cached_slots[ECARD_ROOM_SLOT_WALL_DECOR] = v;
+            lv_image_set_src(s_pomo_img_wdecor, ecard_sprite_wall_decors[v]);
+        }
+    }
+    if (s_pomo_img_chair) {
+        const uint8_t v = ecard_cat_room_equipped(ECARD_ROOM_SLOT_CHAIR);
+        if (s_pomo_cached_slots[ECARD_ROOM_SLOT_CHAIR] != v) {
+            s_pomo_cached_slots[ECARD_ROOM_SLOT_CHAIR] = v;
+            lv_image_set_src(s_pomo_img_chair, ecard_sprite_chairs[v]);
+        }
+    }
+    if (s_pomo_img_desk) {
+        const uint8_t v = ecard_cat_room_equipped(ECARD_ROOM_SLOT_DESK_ITEM);
+        if (s_pomo_cached_slots[ECARD_ROOM_SLOT_DESK_ITEM] != v) {
+            s_pomo_cached_slots[ECARD_ROOM_SLOT_DESK_ITEM] = v;
+            lv_image_set_src(s_pomo_img_desk, ecard_sprite_desk_items[v]);
+        }
+    }
+    const uint8_t lamp_v = ecard_cat_room_equipped(ECARD_ROOM_SLOT_LAMP);
+    if (s_pomo_img_lamp && s_pomo_cached_slots[ECARD_ROOM_SLOT_LAMP] != lamp_v) {
+        s_pomo_cached_slots[ECARD_ROOM_SLOT_LAMP] = lamp_v;
+        if (ecard_sprite_lamps[lamp_v]) {
+            lv_image_set_src(s_pomo_img_lamp, ecard_sprite_lamps[lamp_v]);
+            lv_obj_clear_flag(s_pomo_img_lamp, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_pomo_img_lamp, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_pomo_lamp_glow) {
+        const uint8_t glow_on = (lamp_v > 0 && phase == ECARD_POMODORO_FOCUS &&
+                                 running) ? 1 : 0;
+        if (s_pomo_cached_glow != glow_on) {
+            s_pomo_cached_glow = glow_on;
+            if (glow_on) {
+                lv_obj_clear_flag(s_pomo_lamp_glow, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(s_pomo_lamp_glow, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+    }
+    if (s_pomo_img_rug) {
+        const uint8_t rug_v = ecard_cat_room_equipped(ECARD_ROOM_SLOT_RUG);
+        if (s_pomo_cached_slots[ECARD_ROOM_SLOT_RUG] != rug_v) {
+            s_pomo_cached_slots[ECARD_ROOM_SLOT_RUG] = rug_v;
+            if (ecard_sprite_rugs[rug_v]) {
+                lv_image_set_src(s_pomo_img_rug, ecard_sprite_rugs[rug_v]);
+                lv_obj_clear_flag(s_pomo_img_rug, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(s_pomo_img_rug, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+    }
+
+    apply_pomodoro_cat_frame();
+
+    char idle_tip[64];
+    snprintf(idle_tip, sizeof(idle_tip), "按 OK 开始 %u 分钟专注学习",
              (unsigned)ecard_pomodoro_focus_minutes());
     const char *tip = idle_tip;
     if (phase == ECARD_POMODORO_FOCUS) {
-        tip = ecard_pomodoro_is_running() ? "专心做题吧\nOK 暂停 · DOWN 结束"
-                                          : "已暂停\n按 OK 继续";
+        tip = running ? "小猫陪你认真学习中 · 加油！"
+                      : "已暂停 · 按 OK 键继续学习";
     } else if (phase == ECARD_POMODORO_BREAK || phase == ECARD_POMODORO_LONG_BREAK) {
-        tip = "起来活动一下";
+        tip = "休息一下，站起来喝口水吧";
     } else if (phase == ECARD_POMODORO_DONE) {
-        tip = idle_tip;
+        tip = "专注完成！快请家长在小程序兑奖吧";
     }
     label_set_text(s_pomo_tip, tip);
 
-    const uint32_t colors[5] = {C_MUTED, C_BLUE, C_GREEN, C_AMBER, C_NAVY};
-    lv_obj_set_style_text_color(s_pomo_phase, lv_color_hex(colors[phase]), 0);
+    if (s_lbl_hint) {
+        if ((s_pomo_hint_persistent || s_pomo_hint_ttl_ms > 0) && s_pomo_override_hint[0]) {
+            label_set_text(s_lbl_hint, s_pomo_override_hint);
+        } else {
+            label_set_text(s_lbl_hint, idle ? "OK 开始 · UP+5 · DOWN-5 · 长按菜单"
+                                              : "OK 暂停 · DOWN 结束 · 按UP问小智");
+        }
+    }
+
+    const uint8_t style_key = (uint8_t)(((uint8_t)phase << 1) | (running ? 1u : 0u));
+    if (s_pomo_cached_phase != style_key) {
+        s_pomo_cached_phase = style_key;
+        const uint32_t fg_colors[5] = {C_MUTED, C_BLUE, C_GREEN, 0xB45309, C_NAVY};
+        const uint32_t bg_colors[5] = {0xEEF3F8, C_BLUE_SOFT, 0xECFDF5, C_AMBER_BG, C_BLUE_SOFT};
+        uint32_t fg = fg_colors[phase];
+        uint32_t bg = bg_colors[phase];
+        if (!running && (phase == ECARD_POMODORO_FOCUS ||
+                         phase == ECARD_POMODORO_BREAK ||
+                         phase == ECARD_POMODORO_LONG_BREAK)) {
+            fg = 0xB45309;
+            bg = C_AMBER_BG;
+        }
+        lv_obj_set_style_text_color(s_pomo_phase, lv_color_hex(fg), 0);
+        if (s_pomo_phase_pill) {
+            lv_obj_set_style_bg_color(s_pomo_phase_pill, lv_color_hex(bg), 0);
+        }
+    }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1477,17 +1777,17 @@ static void create_reset_page(void) {
 
 static void create_device_page(void) {
     s_screen = create_page_root();
-    create_page_header(s_screen, "设备信息", "电量 · 存储");
+    create_page_header(s_screen, "设备信息", "电量 · 配对 · 存储");
 
-    lv_obj_t *card = make_box(s_screen, 16, 72, 208, 214, C_SURFACE, C_LINE, 18);
+    lv_obj_t *card = make_box(s_screen, 16, 66, 208, 224, C_SURFACE, C_LINE, 18);
 
-    make_label(card, "电量", &ecard_font_12, C_FAINT, 14, 14, 60, LV_TEXT_ALIGN_LEFT);
+    make_label(card, "电量", &ecard_font_12, C_FAINT, 14, 10, 60, LV_TEXT_ALIGN_LEFT);
     char bat[16];
     format_battery(bat, sizeof(bat));
-    s_lbl_dev_battery = make_label(card, bat, &ecard_font_16, C_INK, 118, 10, 76,
+    s_lbl_dev_battery = make_label(card, bat, &ecard_font_16, C_INK, 118, 6, 76,
                                    LV_TEXT_ALIGN_RIGHT);
     s_bar_dev_battery = lv_bar_create(card);
-    lv_obj_set_pos(s_bar_dev_battery, 14, 40);
+    lv_obj_set_pos(s_bar_dev_battery, 14, 34);
     lv_obj_set_size(s_bar_dev_battery, 180, 6);
     lv_obj_set_style_bg_color(s_bar_dev_battery, lv_color_hex(C_LINE), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_bar_dev_battery, LV_OPA_COVER, LV_PART_MAIN);
@@ -1497,33 +1797,37 @@ static void create_device_page(void) {
     lv_bar_set_range(s_bar_dev_battery, 0, 100);
     lv_bar_set_value(s_bar_dev_battery, s_battery_pct < 0 ? 0 : s_battery_pct, LV_ANIM_OFF);
 
-    make_box(card, 14, 58, 180, 1, C_LINE, NO_BORDER, 0);
+    make_box(card, 14, 48, 180, 1, C_LINE, NO_BORDER, 0);
 
-    /* 四行键值：标签 12 px 下移 4 px 与 16 px 数值共享基线。 */
-    make_label(card, "网络", &ecard_font_12, C_FAINT, 14, 70, 60, LV_TEXT_ALIGN_LEFT);
+    make_label(card, "网络", &ecard_font_12, C_FAINT, 14, 57, 60, LV_TEXT_ALIGN_LEFT);
     s_lbl_dev_network = make_label(card, s_wifi_connected ? "校园网已连接" : "未连接",
-                                   &ecard_font_16, C_INK, 94, 66, 100, LV_TEXT_ALIGN_RIGHT);
+                                   &ecard_font_16, C_INK, 94, 53, 100, LV_TEXT_ALIGN_RIGHT);
 
-    make_label(card, "固件", &ecard_font_12, C_FAINT, 14, 94, 60, LV_TEXT_ALIGN_LEFT);
-    make_label(card, "eCard 1.0.0", &ecard_font_16, C_INK, 94, 90, 100, LV_TEXT_ALIGN_RIGHT);
+    make_label(card, "固件", &ecard_font_12, C_FAINT, 14, 78, 60, LV_TEXT_ALIGN_LEFT);
+    make_label(card, "eCard 1.0.0", &ecard_font_16, C_INK, 94, 74, 100, LV_TEXT_ALIGN_RIGHT);
 
-    make_label(card, "存储", &ecard_font_12, C_FAINT, 14, 118, 48, LV_TEXT_ALIGN_LEFT);
-    s_lbl_dev_storage = make_label(card, "0/20 条 · 0 KB", &ecard_font_12, C_INK, 62, 118, 132,
+    make_label(card, "存储", &ecard_font_12, C_FAINT, 14, 99, 48, LV_TEXT_ALIGN_LEFT);
+    s_lbl_dev_storage = make_label(card, "0/20 条 · 0 KB", &ecard_font_12, C_INK, 62, 99, 132,
                                    LV_TEXT_ALIGN_RIGHT);
 
-    make_label(card, "模式", &ecard_font_12, C_FAINT, 14, 142, 60, LV_TEXT_ALIGN_LEFT);
-    make_label(card, "电子学生证", &ecard_font_16, C_INK, 94, 138, 100, LV_TEXT_ALIGN_RIGHT);
+    make_label(card, "模式", &ecard_font_12, C_FAINT, 14, 120, 60, LV_TEXT_ALIGN_LEFT);
+    make_label(card, "电子学生证", &ecard_font_16, C_INK, 94, 116, 100, LV_TEXT_ALIGN_RIGHT);
 
-    s_dev_note = make_box(card, 12, 164, 184, 38, C_RED_SOFT, 0xF6D5D5, 12);
-    s_dev_note_badge = make_box(s_dev_note, 10, 9, 20, 20, C_RED, NO_BORDER, 10);
+    lv_obj_t *pair_btn = make_box(card, 12, 140, 184, 34, C_BLUE_SOFT, C_BLUE, 10);
+    make_label(pair_btn, "家长配对", &ecard_font_16, C_BLUE, 10, 6, 76, LV_TEXT_ALIGN_LEFT);
+    s_lbl_dev_pair = make_label(pair_btn, "", &ecard_font_12, C_BLUE, 84, 9, 90,
+                                LV_TEXT_ALIGN_RIGHT);
+
+    s_dev_note = make_box(card, 12, 180, 184, 36, C_RED_SOFT, 0xF6D5D5, 12);
+    s_dev_note_badge = make_box(s_dev_note, 10, 8, 20, 20, C_RED, NO_BORDER, 10);
     make_label(s_dev_note_badge, "!", &ecard_font_12, C_SURFACE, 0, 2, 20,
                LV_TEXT_ALIGN_CENTER);
-    s_lbl_dev_note_title = make_label(s_dev_note, "紧急求助", &ecard_font_16, C_RED, 40, 3,
+    s_lbl_dev_note_title = make_label(s_dev_note, "紧急求助", &ecard_font_16, C_RED, 40, 2,
                                       138, LV_TEXT_ALIGN_LEFT);
     s_lbl_dev_note_sub = make_label(s_dev_note, "长按 DOWN 键 3 秒", &ecard_font_12, C_RED,
-                                    40, 22, 138, LV_TEXT_ALIGN_LEFT);
+                                    40, 20, 138, LV_TEXT_ALIGN_LEFT);
 
-    create_page_hint(s_screen, "OK 返回 · DOWN 设备重置");
+    create_page_hint(s_screen, "UP 配对 · DOWN 重置 · OK 返回");
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1970,7 +2274,147 @@ static void update_device_content(void) {
                  (unsigned long)kb);
         label_set_text(s_lbl_dev_storage, st);
     }
+    if (s_lbl_dev_pair) {
+        if (ecard_cat_room_is_bound()) {
+            char pair_txt[32];
+            snprintf(pair_txt, sizeof(pair_txt), "已绑定(%u) · UP",
+                     (unsigned)ecard_cat_room_parent_count());
+            label_set_text(s_lbl_dev_pair, pair_txt);
+        } else {
+            label_set_text(s_lbl_dev_pair, "未配对 · 按 UP");
+        }
+    }
     update_device_note();
+}
+
+static void build_pair_qr_payload(char *out, size_t out_size) {
+    char dev_id[16] = "AABBCCDDEEFF";
+#if defined(ESP_PLATFORM)
+    uint8_t mac[6] = {0};
+    if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK) {
+        snprintf(dev_id, sizeof(dev_id), "%02X%02X%02X%02X%02X%02X",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
+#endif
+    char ip[24] = "0.0.0.0";
+    (void)ecard_lan_http_get_ip(ip, sizeof(ip));
+    (void)ecard_cat_room_build_qr_payload(dev_id, ip, 80, out, out_size);
+}
+
+static void draw_pair_qr(lv_event_t *event) {
+    lv_obj_t *obj = lv_event_get_target_obj(event);
+    lv_layer_t *layer = lv_event_get_layer(event);
+    if (!obj || !layer || s_pair_qr_size <= 0) return;
+
+    const int qr_size = s_pair_qr_size;
+    lv_area_t coords;
+    lv_obj_get_coords(obj, &coords);
+    int32_t box_w = coords.x2 - coords.x1 + 1;
+    int32_t box_h = coords.y2 - coords.y1 + 1;
+    int32_t side = box_w < box_h ? box_w : box_h;
+    int32_t scale = (side - 10) / qr_size;
+    if (scale < 1) scale = 1;
+    int32_t draw_side = scale * qr_size;
+    int32_t x0 = coords.x1 + (box_w - draw_side) / 2;
+    int32_t y0 = coords.y1 + (box_h - draw_side) / 2;
+
+    lv_draw_rect_dsc_t dsc;
+    lv_draw_rect_dsc_init(&dsc);
+    dsc.bg_opa = LV_OPA_COVER;
+    dsc.bg_color = lv_color_hex(0x0F172A);
+    dsc.radius = 0;
+    dsc.border_width = 0;
+
+    for (int r = 0; r < qr_size; ++r) {
+        int c = 0;
+        while (c < qr_size) {
+            if (!ecard_qr_bit(s_pair_qr_bits, qr_size, r, c)) {
+                ++c;
+                continue;
+            }
+            int run = c + 1;
+            while (run < qr_size && ecard_qr_bit(s_pair_qr_bits, qr_size, r, run)) {
+                ++run;
+            }
+            lv_area_t area = {
+                x0 + c * scale,
+                y0 + r * scale,
+                x0 + run * scale - 1,
+                y0 + (r + 1) * scale - 1
+            };
+            lv_draw_rect(layer, &dsc, &area);
+            c = run;
+        }
+    }
+}
+
+static void update_pair_content(void) {
+    char payload[160];
+    build_pair_qr_payload(payload, sizeof(payload));
+    if (s_pair_qr_size <= 0 || strcmp(payload, s_pair_qr_payload) != 0) {
+        int qr_size = 0;
+        if (ecard_qr_encode_packed(payload, s_pair_qr_bits, sizeof(s_pair_qr_bits), &qr_size) &&
+            qr_size > 0) {
+            s_pair_qr_size = qr_size;
+            snprintf(s_pair_qr_payload, sizeof(s_pair_qr_payload), "%s", payload);
+        } else {
+            s_pair_qr_size = 0;
+            s_pair_qr_payload[0] = '\0';
+        }
+    }
+
+    if (s_pair_code_lbl) {
+        char code[16] = {0};
+        ecard_cat_room_get_pair_code(code, sizeof(code));
+        char buf[32];
+        snprintf(buf, sizeof(buf), "配对码: %s", code);
+        label_set_text(s_pair_code_lbl, buf);
+    }
+    if (s_pair_status_lbl) {
+        if (ecard_cat_room_is_bound()) {
+            char st[48];
+            snprintf(st, sizeof(st), "已绑定主家长 · 共 %u 位家长",
+                     (unsigned)ecard_cat_room_parent_count());
+            label_set_text(s_pair_status_lbl, st);
+            lv_obj_set_style_text_color(s_pair_status_lbl, lv_color_hex(C_GREEN), 0);
+        } else {
+            label_set_text(s_pair_status_lbl, "未配对 · 请用小程序扫码");
+            lv_obj_set_style_text_color(s_pair_status_lbl, lv_color_hex(C_MUTED), 0);
+        }
+    }
+    if (s_pair_ip_lbl) {
+        char ip[24] = {0};
+        if (s_wifi_connected && ecard_lan_http_get_ip(ip, sizeof(ip))) {
+            char line[48];
+            snprintf(line, sizeof(line), "局域网 %s", ip);
+            label_set_text(s_pair_ip_lbl, line);
+        } else {
+            label_set_text(s_pair_ip_lbl, "Wi-Fi 未连接");
+        }
+    }
+    if (s_pair_qr) {
+        lv_obj_invalidate(s_pair_qr);
+    }
+}
+
+static void create_pair_page(void) {
+    s_screen = create_page_root();
+    create_page_header(s_screen, "家长配对", "小程序扫码绑定");
+
+    lv_obj_t *card = make_box(s_screen, 16, 62, 208, 232, C_SURFACE, C_LINE, 16);
+
+    s_pair_qr = make_box(card, 35, 8, 138, 138, C_SURFACE, C_LINE, 8);
+    lv_obj_add_event_cb(s_pair_qr, draw_pair_qr, LV_EVENT_DRAW_MAIN, NULL);
+
+    s_pair_code_lbl = make_label(card, "", &ecard_font_16, C_NAVY, 10, 154, 188,
+                                 LV_TEXT_ALIGN_CENTER);
+    s_pair_status_lbl = make_label(card, "", &ecard_font_12, C_MUTED, 10, 180, 188,
+                                   LV_TEXT_ALIGN_CENTER);
+    s_pair_ip_lbl = make_label(card, "", &ecard_font_12, C_FAINT, 10, 202, 188,
+                               LV_TEXT_ALIGN_CENTER);
+
+    create_page_hint(s_screen, "UP 刷新配对码 · OK 返回 · 长按菜单");
+    update_pair_content();
 }
 
 #endif /* HAS_LVGL_RUNTIME */
@@ -1990,14 +2434,24 @@ void ecard_ui_reset_navigation(void) {
     s_is_dimmed = false;
     s_has_playing_msg = false;
     memset(&s_playing_msg, 0, sizeof(s_playing_msg));
+    s_screen_off = false;
+    s_pomo_hint_persistent = false;
+    s_pomo_hint_ttl_ms = 0;
+    s_pomo_override_hint[0] = '\0';
+    ecard_cat_room_set_pairing_active(false);
 }
 
 void ecard_ui_create(void) {
     s_idle_elapsed_ms = 0;
     s_is_dimmed = false;
+    s_screen_off = false;
     s_modal = ECARD_UI_MODAL_NONE;
     s_page = ECARD_UI_PAGE_HOME;
     s_menu_selection = 0;
+    s_pomo_hint_persistent = false;
+    s_pomo_hint_ttl_ms = 0;
+    s_pomo_override_hint[0] = '\0';
+    ecard_cat_room_set_pairing_active(false);
 
 #if HAS_LVGL_RUNTIME
     reset_page_pointers();
@@ -2009,22 +2463,30 @@ void ecard_ui_create(void) {
 
 void ecard_ui_destroy(void) {
 #if HAS_LVGL_RUNTIME
+    reset_page_pointers();
     if (s_screen) {
         lv_obj_delete(s_screen);
         s_screen = NULL;
     }
-    reset_page_pointers();
 #endif
     s_modal = ECARD_UI_MODAL_NONE;
     s_has_playing_msg = false;
     memset(&s_playing_msg, 0, sizeof(s_playing_msg));
+    s_pomo_hint_persistent = false;
+    s_pomo_hint_ttl_ms = 0;
+    s_pomo_override_hint[0] = '\0';
+    ecard_cat_room_set_pairing_active(false);
 }
 
 void ecard_ui_show_page(ecard_ui_page_t page) {
-    if (page < ECARD_UI_PAGE_HOME || page > ECARD_UI_PAGE_DEVICE) return;
+    if (page < ECARD_UI_PAGE_HOME || page > ECARD_UI_PAGE_PAIR) return;
     if (s_modal != ECARD_UI_MODAL_NONE) return;
 
     s_page = page;
+    s_pomo_hint_persistent = false;
+    s_pomo_hint_ttl_ms = 0;
+    s_pomo_override_hint[0] = '\0';
+    ecard_cat_room_set_pairing_active(page == ECARD_UI_PAGE_PAIR);
 
 #if HAS_LVGL_RUNTIME
     /* 先释放旧屏幕再创建新页面：避免菜单页(30+ 控件)与选年级页(53 控件)同时驻留 LVGL 池，
@@ -2078,6 +2540,9 @@ void ecard_ui_show_page(ecard_ui_page_t page) {
     case ECARD_UI_PAGE_DEVICE:
         create_device_page();
         update_device_content();
+        break;
+    case ECARD_UI_PAGE_PAIR:
+        create_pair_page();
         break;
     default:
         break;
@@ -2196,8 +2661,12 @@ void ecard_ui_refresh_content(void) {
         update_menu_voice_sub();
     } else if (s_page == ECARD_UI_PAGE_QUIZ) {
         update_quiz_content();
+    } else if (s_page == ECARD_UI_PAGE_POMODORO) {
+        update_pomodoro_content();
     } else if (s_page == ECARD_UI_PAGE_DEVICE) {
         update_device_content();
+    } else if (s_page == ECARD_UI_PAGE_PAIR) {
+        update_pair_content();
     }
 #endif
 }
@@ -2229,6 +2698,16 @@ void ecard_ui_pomodoro_refresh(void) {
 #if HAS_LVGL_RUNTIME
     if (s_page == ECARD_UI_PAGE_POMODORO) {
         update_pomodoro_content();
+    }
+#endif
+}
+
+void ecard_ui_pair_refresh(void) {
+#if HAS_LVGL_RUNTIME
+    if (s_page == ECARD_UI_PAGE_PAIR) {
+        update_pair_content();
+    } else if (s_page == ECARD_UI_PAGE_DEVICE) {
+        update_device_content();
     }
 #endif
 }
@@ -2284,13 +2763,48 @@ void ecard_ui_show_ai_listen_modal(uint8_t remaining_sec, uint8_t audio_amplitud
 }
 
 void ecard_ui_set_hint(const char *text) {
+    if (s_page == ECARD_UI_PAGE_POMODORO && text && text[0]) {
+        snprintf(s_pomo_override_hint, sizeof(s_pomo_override_hint), "%s", text);
+        s_pomo_hint_persistent = false;
+        s_pomo_hint_ttl_ms = 3500;
+    }
 #if HAS_LVGL_RUNTIME
     if (s_lbl_hint && text) {
         label_set_text(s_lbl_hint, text);
     }
-#else
-    (void)text;
 #endif
+}
+
+void ecard_ui_set_hint_persistent(const char *text) {
+    if (!text || !text[0]) return;
+    if (s_page == ECARD_UI_PAGE_POMODORO) {
+        snprintf(s_pomo_override_hint, sizeof(s_pomo_override_hint), "%s", text);
+        s_pomo_hint_persistent = true;
+        s_pomo_hint_ttl_ms = 0;
+    }
+#if HAS_LVGL_RUNTIME
+    if (s_lbl_hint) {
+        label_set_text(s_lbl_hint, text);
+    }
+#endif
+}
+
+void ecard_ui_clear_pomodoro_hint(void) {
+    s_pomo_hint_persistent = false;
+    s_pomo_hint_ttl_ms = 0;
+    s_pomo_override_hint[0] = '\0';
+#if HAS_LVGL_RUNTIME
+    if (s_page == ECARD_UI_PAGE_POMODORO) {
+        update_pomodoro_content();
+    }
+#endif
+}
+
+const char *ecard_ui_pomodoro_override_hint(void) {
+    return ((s_pomo_hint_persistent || s_pomo_hint_ttl_ms > 0) &&
+            s_pomo_override_hint[0])
+               ? s_pomo_override_hint
+               : "";
 }
 
 void ecard_ui_set_playing_message(const ecard_message_t *msg) {
@@ -2384,20 +2898,57 @@ ecard_ui_modal_t ecard_ui_get_modal(void) {
     return s_modal;
 }
 
+static bool pomodoro_active_for_power(void) {
+    if (s_page != ECARD_UI_PAGE_POMODORO) return false;
+    if (!ecard_pomodoro_is_running()) return false;
+    const ecard_pomodoro_phase_t phase = ecard_pomodoro_phase();
+    return phase == ECARD_POMODORO_FOCUS ||
+           phase == ECARD_POMODORO_BREAK ||
+           phase == ECARD_POMODORO_LONG_BREAK;
+}
+
 void ecard_ui_feed_activity(void) {
     s_idle_elapsed_ms = 0;
     s_is_dimmed = false;
+    s_screen_off = false;
+}
+
+ecard_ui_idle_action_t ecard_ui_poll_idle_state(uint32_t delta_ms) {
+    if (!s_pomo_hint_persistent && s_pomo_hint_ttl_ms > 0) {
+        if (delta_ms >= s_pomo_hint_ttl_ms) {
+            s_pomo_hint_ttl_ms = 0;
+            s_pomo_override_hint[0] = '\0';
+        } else {
+            s_pomo_hint_ttl_ms -= delta_ms;
+        }
+    }
+    if (s_modal != ECARD_UI_MODAL_NONE) {
+        s_idle_elapsed_ms = 0;
+        return ECARD_UI_IDLE_NONE;
+    }
+    s_idle_elapsed_ms += delta_ms;
+    if (pomodoro_active_for_power()) {
+        if (s_idle_elapsed_ms >= ECARD_DIM_TIMEOUT_MS && !s_is_dimmed) {
+            s_is_dimmed = true;
+            return ECARD_UI_IDLE_DIM;
+        }
+        return ECARD_UI_IDLE_NONE;
+    }
+    if (s_idle_elapsed_ms >= ECARD_IDLE_TIMEOUT_MS && !s_screen_off) {
+        s_screen_off = true;
+        return ECARD_UI_IDLE_OFF;
+    }
+    return ECARD_UI_IDLE_NONE;
+}
+
+bool ecard_ui_is_dimmed(void) {
+    return s_is_dimmed;
+}
+
+bool ecard_ui_is_screen_off(void) {
+    return s_screen_off;
 }
 
 bool ecard_ui_check_idle_timeout(uint32_t delta_ms) {
-    if (s_modal != ECARD_UI_MODAL_NONE) {
-        s_idle_elapsed_ms = 0;
-        return false;
-    }
-    s_idle_elapsed_ms += delta_ms;
-    if (s_idle_elapsed_ms >= ECARD_IDLE_TIMEOUT_MS && !s_is_dimmed) {
-        s_is_dimmed = true;
-        return true;
-    }
-    return false;
+    return ecard_ui_poll_idle_state(delta_ms) == ECARD_UI_IDLE_OFF;
 }

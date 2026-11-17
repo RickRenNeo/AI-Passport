@@ -5,6 +5,7 @@
 #define _DARWIN_C_SOURCE
 #endif
 #include "ecard_app.h"
+#include "ecard_cat_room.h"
 #include "ecard_flashcard.h"
 #include "ecard_messages.h"
 #include "ecard_pomodoro.h"
@@ -565,6 +566,269 @@ static void test_ecard_app_record_full_async_handoff(void) {
     (void)system(rm_cmd);
 }
 
+static void nav_to_menu_item(ecard_menu_item_t item) {
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
+    assert(ecard_ui_get_page() == ECARD_UI_PAGE_MENU);
+    for (int i = 0; i < (int)item; ++i) {
+        ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_CLICK);
+    }
+    assert(ecard_ui_menu_selection() == item);
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
+}
+
+static void test_pomodoro_on_demand_ai_and_points_and_abort(void) {
+    extern bool ecard_stub_ai_ready;
+    extern bool ecard_stub_ai_speaking;
+    extern bool ecard_stub_lan_ai_busy;
+    extern unsigned ecard_stub_ai_session_start_calls;
+    extern unsigned ecard_stub_ai_session_stop_calls;
+
+    ecard_cat_room_reset_all();
+    ecard_pomodoro_reset();
+    ecard_pomodoro_set_focus_minutes(ECARD_POMODORO_FOCUS_MIN);
+    ecard_app_init();
+    clear_unread_messages();
+    ecard_stub_ai_ready = true;
+    ecard_stub_ai_speaking = false;
+    ecard_stub_lan_ai_busy = false;
+
+    const unsigned starts_before = ecard_stub_ai_session_start_calls;
+    nav_to_menu_item(ECARD_MENU_POMODORO);
+    assert(ecard_ui_get_page() == ECARD_UI_PAGE_POMODORO);
+
+    // 1. 进入番茄钟页面不得预连小智，LAN HTTP 保持可用
+    assert(ecard_stub_ai_session_start_calls == starts_before);
+    assert(!ecard_stub_lan_ai_busy);
+
+    // 1b. 连接尚未就绪时松开 UP：连上后不得自动跳进录音，保持 20s 就绪窗口与常驻提示；宽限后释放 HTTP
+    ecard_stub_ai_ready = false;
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_LONG);
+    assert(ecard_stub_lan_ai_busy);
+    assert(strcmp(ecard_ui_pomodoro_override_hint(), "正在连接小智…") == 0);
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_RELEASE);
+    assert(strcmp(ecard_ui_pomodoro_override_hint(), "正在连接小智…") == 0);
+    ecard_ui_feed_activity();
+    (void)ecard_ui_poll_idle_state(4000);
+    assert(strcmp(ecard_ui_pomodoro_override_hint(), "正在连接小智…") == 0);
+    ecard_stub_ai_ready = true;
+    ecard_app_tick(10, 0, 1000);
+    assert(!ecard_app_ai_listening());
+    assert(strcmp(ecard_ui_pomodoro_override_hint(), "小智已就绪，长按 UP 说话") == 0);
+    ecard_ui_feed_activity();
+    (void)ecard_ui_poll_idle_state(4000);
+    assert(strcmp(ecard_ui_pomodoro_override_hint(), "小智已就绪，长按 UP 说话") == 0);
+    for (int i = 0; i < 19; ++i) {
+        ecard_app_tick(10, 0, 1000);
+    }
+    assert(ecard_stub_lan_ai_busy);
+    ecard_app_tick(10, 0, 1000);
+    assert(!ecard_stub_lan_ai_busy);
+    assert(ecard_ui_pomodoro_override_hint()[0] == '\0');
+
+    // 2. 长按 UP 触发按需握手与监听；未就绪时持续按住，连上后自动进录音，20s 宽限后释放 HTTP
+    ecard_stub_ai_ready = false;
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_LONG);
+    assert(ecard_stub_lan_ai_busy);
+    assert(ecard_app_get_state() == ECARD_APP_STATE_IDLE);
+
+    ecard_stub_ai_ready = true;
+    ecard_app_tick(10, 0, 1000);
+    assert(ecard_app_ai_listening());
+    assert(ecard_app_get_state() == ECARD_APP_STATE_RECORDING);
+
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_RELEASE);
+    assert(!ecard_app_ai_listening());
+    assert(ecard_app_get_state() == ECARD_APP_STATE_IDLE);
+    // 若硬件未补发 CLICK，下一次真实短按 UP (PRESS -> RELEASE -> CLICK) 必须正常 +5 分钟
+    const uint8_t min_before = ecard_pomodoro_focus_minutes();
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_PRESS);
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_RELEASE);
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_CLICK);
+    assert(ecard_pomodoro_focus_minutes() == min_before + ECARD_POMODORO_FOCUS_STEP);
+    ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_CLICK);
+    assert(ecard_pomodoro_focus_minutes() == min_before);
+
+    // 小智说话期间保持连接；说完后超过 20s 自动关闭会话、恢复 LAN HTTP
+    ecard_stub_ai_speaking = true;
+    ecard_app_tick(10, 0, 5000);
+    assert(ecard_stub_lan_ai_busy);
+    ecard_stub_ai_speaking = false;
+    const unsigned stops_before = ecard_stub_ai_session_stop_calls;
+    for (int i = 0; i < 20; ++i) {
+        ecard_app_tick(10, 0, 1000);
+    }
+    assert(ecard_stub_ai_session_stop_calls == stops_before + 1);
+    assert(!ecard_stub_lan_ai_busy);
+
+    // 2b. 专注计时中：点按 UP 即可松手触发连接，就绪后常驻提示 20s，再长按 UP 秒开录音
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
+    assert(ecard_pomodoro_phase() == ECARD_POMODORO_FOCUS);
+    ecard_stub_ai_ready = false;
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_PRESS);
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_RELEASE);
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_CLICK);
+    assert(ecard_pomodoro_focus_minutes() == min_before);
+    assert(ecard_stub_lan_ai_busy);
+    assert(!ecard_app_ai_listening());
+    assert(strcmp(ecard_ui_pomodoro_override_hint(), "正在连接小智…") == 0);
+    ecard_ui_feed_activity();
+    (void)ecard_ui_poll_idle_state(4000);
+    assert(strcmp(ecard_ui_pomodoro_override_hint(), "正在连接小智…") == 0);
+    ecard_stub_ai_ready = true;
+    ecard_app_tick(10, 0, 1000);
+    assert(strcmp(ecard_ui_pomodoro_override_hint(), "小智已就绪，长按 UP 说话") == 0);
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_LONG);
+    assert(ecard_app_ai_listening());
+    assert(ecard_app_get_state() == ECARD_APP_STATE_RECORDING);
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_RELEASE);
+    assert(!ecard_app_ai_listening());
+    for (int i = 0; i < 20; ++i) {
+        ecard_app_tick(10, 0, 1000);
+    }
+    assert(!ecard_stub_lan_ai_busy);
+    assert(ecard_ui_pomodoro_override_hint()[0] == '\0');
+    ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_CLICK);
+    assert(ecard_pomodoro_phase() == ECARD_POMODORO_IDLE);
+
+    // 3. 完成一轮 25 分钟 FOCUS 后自动记入 +25 积分，并从暗屏状态自动唤醒
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
+    assert(ecard_pomodoro_phase() == ECARD_POMODORO_FOCUS);
+    assert(ecard_ui_poll_idle_state(60000) == ECARD_UI_IDLE_DIM);
+    assert(ecard_ui_is_dimmed());
+    for (int s = 0; s < 25 * 60; ++s) {
+        ecard_app_tick(10, s / 60, 1000);
+    }
+    assert(ecard_pomodoro_phase() == ECARD_POMODORO_BREAK);
+    assert(!ecard_ui_is_dimmed());
+    assert(ecard_cat_room_pending_points() == 25);
+    assert(ecard_cat_room_completed_sessions() == 1);
+
+    // 3b. 完成 5 分钟 BREAK 进入 DONE 后，按 UP/DOWN 应退回 IDLE 并实时更新专注时长
+    for (int s = 0; s < ECARD_POMODORO_BREAK_MIN * 60; ++s) {
+        ecard_app_tick(10, 25 + s / 60, 1000);
+    }
+    assert(ecard_pomodoro_phase() == ECARD_POMODORO_DONE);
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_CLICK);
+    assert(ecard_pomodoro_phase() == ECARD_POMODORO_IDLE);
+    assert(ecard_pomodoro_focus_minutes() == 30);
+    ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_CLICK);
+    assert(ecard_pomodoro_focus_minutes() == 25);
+
+    // 4. 在 FOCUS 期间按 OK 长按切出页面，立即中止且不得加分
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
+    assert(ecard_pomodoro_phase() == ECARD_POMODORO_FOCUS);
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_LONG);
+    assert(ecard_ui_get_page() == ECARD_UI_PAGE_MENU);
+    assert(ecard_pomodoro_phase() == ECARD_POMODORO_IDLE);
+    assert(ecard_cat_room_pending_points() == 25);
+
+    // 5. 回到菜单重进，开始 FOCUS 并在剩 1 秒暂停后长按 OK 离开 / 长按 DOWN SOS，也必须 0 分中止
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
+    assert(ecard_ui_get_page() == ECARD_UI_PAGE_POMODORO);
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
+    for (int s = 0; s < 25 * 60 - 1; ++s) {
+        ecard_app_tick(11, s / 60, 1000);
+    }
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK); // pause at 00:01
+    assert(!ecard_pomodoro_is_running());
+    ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_LONG); // SOS cancels pomodoro
+    assert(ecard_pomodoro_phase() == ECARD_POMODORO_IDLE);
+    assert(ecard_cat_room_pending_points() == 25);
+    ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_RELEASE);
+    assert(ecard_ui_get_page() == ECARD_UI_PAGE_POMODORO);
+    ecard_pomodoro_reset();
+    ecard_cat_room_reset_all();
+}
+
+static void test_device_to_pair_navigation(void) {
+    ecard_cat_room_reset_all();
+    ecard_app_init();
+    clear_unread_messages();
+
+    nav_to_menu_item(ECARD_MENU_DEVICE);
+    assert(ecard_ui_get_page() == ECARD_UI_PAGE_DEVICE);
+    assert(!ecard_cat_room_is_pairing_active());
+
+    // UP click 进入家长扫码配对页
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_CLICK);
+    assert(ecard_ui_get_page() == ECARD_UI_PAGE_PAIR);
+    assert(ecard_cat_room_is_pairing_active());
+
+    // UP click 刷新配对码
+    char old_code[16];
+    char new_code[16];
+    ecard_cat_room_get_pair_code(old_code, sizeof(old_code));
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_CLICK);
+    ecard_cat_room_get_pair_code(new_code, sizeof(new_code));
+    assert(strcmp(old_code, new_code) != 0);
+
+    // OK click 返回设备信息页；再次进入后 OK long 返回菜单，窗口自动关闭
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
+    assert(ecard_ui_get_page() == ECARD_UI_PAGE_DEVICE);
+    assert(!ecard_cat_room_is_pairing_active());
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_CLICK);
+    assert(ecard_ui_get_page() == ECARD_UI_PAGE_PAIR);
+    assert(ecard_cat_room_is_pairing_active());
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_LONG);
+    assert(ecard_ui_get_page() == ECARD_UI_PAGE_MENU);
+    assert(!ecard_cat_room_is_pairing_active());
+    ecard_cat_room_reset_all();
+}
+
+static void test_pomodoro_ai_connect_fail_resets_and_hints(void) {
+    extern bool ecard_stub_ai_ready;
+    extern bool ecard_stub_ai_connect_failed;
+    extern bool ecard_stub_lan_ai_busy;
+    extern unsigned ecard_stub_ai_session_stop_calls;
+
+    ecard_cat_room_reset_all();
+    ecard_pomodoro_reset();
+    ecard_app_init();
+    clear_unread_messages();
+    ecard_stub_ai_ready = false;
+    ecard_stub_ai_connect_failed = false;
+    ecard_stub_lan_ai_busy = false;
+
+    nav_to_menu_item(ECARD_MENU_POMODORO);
+    assert(ecard_ui_get_page() == ECARD_UI_PAGE_POMODORO);
+
+    // 1. 按住 UP 等待连接期间服务端/TLS 立即报错：必须退出等待、恢复 LAN HTTP、提示连接失败
+    const unsigned stops_before = ecard_stub_ai_session_stop_calls;
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_LONG);
+    assert(ecard_stub_lan_ai_busy);
+    ecard_stub_ai_connect_failed = true;
+    ecard_app_tick(10, 0, 1000);
+    assert(!ecard_stub_lan_ai_busy);
+    assert(!ecard_app_ai_listening());
+    assert(ecard_stub_ai_session_stop_calls == stops_before + 1);
+    assert(strcmp(ecard_ui_pomodoro_override_hint(), "小智连接失败，请稍后再试") == 0);
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_RELEASE);
+    assert(!ecard_app_ai_listening());
+
+    // 2. 持续按住 UP 但一直未就绪超过 15 秒超时：同样必须回收会话、恢复 LAN HTTP、给出失败提示
+    ecard_stub_ai_connect_failed = false;
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_LONG);
+    assert(ecard_stub_lan_ai_busy);
+    for (int i = 0; i < 14; ++i) {
+        ecard_app_tick(10, 0, 1000);
+    }
+    assert(ecard_stub_lan_ai_busy);
+    ecard_app_tick(10, 0, 1000);
+    assert(!ecard_stub_lan_ai_busy);
+    assert(!ecard_app_ai_listening());
+    assert(strcmp(ecard_ui_pomodoro_override_hint(), "小智连接失败，请稍后再试") == 0);
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_RELEASE);
+
+    // 3. 确保首页长按 OK 10 秒录音上限未被削弱
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_LONG);
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_LONG);
+    assert(ecard_ui_get_page() == ECARD_UI_PAGE_HOME);
+    assert(ECARD_VOICE_RECORD_SEC == 10);
+    assert(ECARD_VOICE_RECORD_SEC * ECARD_VOICE_BYTES_PER_SEC == 40000);
+    ecard_pomodoro_reset();
+    ecard_cat_room_reset_all();
+}
+
 int main(void) {
     printf("Running ecard_app tests...\n");
     test_ecard_app_recording_lifecycle();
@@ -584,6 +848,9 @@ int main(void) {
     test_ecard_app_ai_long_press_followup();
     test_ecard_app_playing_transcript_metadata();
     test_ecard_app_record_full_async_handoff();
+    test_pomodoro_on_demand_ai_and_points_and_abort();
+    test_device_to_pair_navigation();
+    test_pomodoro_ai_connect_fail_resets_and_hints();
     printf("ecard_app tests passed!\n");
     return 0;
 }
