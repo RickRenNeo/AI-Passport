@@ -1,3 +1,9 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 #include "ecard_cards.h"
 
 #include <assert.h>
@@ -37,8 +43,11 @@ static void remove_dir_files(const char *dir_path) {
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
             continue;
         }
-        char path[256];
-        snprintf(path, sizeof(path), "%s/%s", dir_path, ent->d_name);
+        char path[1024];
+        const int n = snprintf(path, sizeof(path), "%s/%s", dir_path, ent->d_name);
+        if (n <= 0 || (size_t)n >= sizeof(path)) {
+            continue;
+        }
         (void)unlink(path);
     }
     closedir(d);
