@@ -58,41 +58,51 @@ static void test_every_quiz_prompt_fits(void) {
 }
 
 static void test_every_poem_pair_fits(void) {
+    ecard_cards_reset_curriculum();
     for (uint8_t grade = 1; grade <= ECARD_GRADE_COUNT; ++grade) {
-        uint8_t count = 0;
-        const ecard_card_t *cards = ecard_cards_poems(grade, &count);
-        assert(cards != NULL);
-        for (uint8_t i = 0; i < count; ++i) {
-            char prompt[96];
-            ecard_ai_build_poem_prompt(&cards[i], prompt, sizeof(prompt));
-            assert(prompt[0] != '\0');
-            assert(ecard_ai_prompt_fits(prompt));
-            /* 正常情况下应该是上下句原样拼起来，不该退化。 */
-            if (cards[i].front && cards[i].back) {
-                char pair[64];
-                snprintf(pair, sizeof(pair), "%s|%s", cards[i].front, cards[i].back);
-                assert(strcmp(prompt, pair) == 0);
+        const uint8_t decks = ecard_cards_deck_count(ECARD_CARD_POEM, grade);
+        assert(decks >= 2);
+        for (uint8_t d = 0; d < decks; ++d) {
+            uint8_t count = 0;
+            const ecard_card_t *cards = ecard_cards_load_deck(ECARD_CARD_POEM, grade, d, &count);
+            assert(cards != NULL && count > 0);
+            for (uint8_t i = 0; i < count; ++i) {
+                char prompt[96];
+                ecard_ai_build_poem_prompt(&cards[i], prompt, sizeof(prompt));
+                assert(prompt[0] != '\0');
+                assert(ecard_ai_prompt_fits(prompt));
+                /* 正常情况下应该是上下句原样拼起来，不该退化。 */
+                if (cards[i].front && cards[i].back) {
+                    char pair[64];
+                    snprintf(pair, sizeof(pair), "%s|%s", cards[i].front, cards[i].back);
+                    assert(strcmp(prompt, pair) == 0);
+                }
             }
         }
     }
 }
 
 static void test_every_word_prompt_fits(void) {
+    ecard_cards_reset_curriculum();
     for (uint8_t grade = 1; grade <= ECARD_GRADE_COUNT; ++grade) {
-        uint8_t count = 0;
-        const ecard_card_t *cards = ecard_cards_words(grade, &count);
-        assert(cards != NULL);
-        for (uint8_t i = 0; i < count; ++i) {
-            char first[96];
-            char example[64];
-            ecard_ai_build_word_prompts(&cards[i], first, sizeof(first),
-                                        example, sizeof(example));
-            assert(first[0] != '\0');
-            assert(ecard_ai_prompt_fits(first));
-            assert(strncmp(first, "读:", 3) == 0);
-            if (example[0]) {
-                assert(ecard_ai_prompt_fits(example));
-                assert(strcmp(example, cards[i].example) == 0);
+        const uint8_t decks = ecard_cards_deck_count(ECARD_CARD_WORD, grade);
+        assert(decks == 12);
+        for (uint8_t d = 0; d < decks; ++d) {
+            uint8_t count = 0;
+            const ecard_card_t *cards = ecard_cards_load_deck(ECARD_CARD_WORD, grade, d, &count);
+            assert(cards != NULL && count > 0);
+            for (uint8_t i = 0; i < count; ++i) {
+                char first[96];
+                char example[64];
+                ecard_ai_build_word_prompts(&cards[i], first, sizeof(first),
+                                            example, sizeof(example));
+                assert(first[0] != '\0');
+                assert(ecard_ai_prompt_fits(first));
+                assert(strncmp(first, "读:", 3) == 0);
+                if (example[0]) {
+                    assert(ecard_ai_prompt_fits(example));
+                    assert(strcmp(example, cards[i].example) == 0);
+                }
             }
         }
     }

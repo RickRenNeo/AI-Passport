@@ -1,4 +1,6 @@
 #include "ecard_cat_room.h"
+#include "ecard_cards.h"
+#include "ecard_setup.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
@@ -1094,6 +1096,84 @@ static int handle_http_locked(const char *method, const char *path,
         sw_raw(&w, ",\"item_id\":");
         sw_json_str(&w, it->id);
         sw_raw(&w, "}");
+        return finish_json(&w, resp_buf, resp_size);
+    }
+
+    // 11. GET / POST /api/curriculum (家长查询或配置学生当前年级与最多 3 个保留年级)
+    if ((is_get || is_post) && path_is(path, "/api/curriculum")) {
+        if (is_post) {
+            const char *cg_val = find_json_value(body, "current_grade");
+            if (!cg_val || !isdigit((unsigned char)*cg_val)) {
+                return make_error(resp_buf, resp_size, 400, "invalid_curriculum");
+            }
+            unsigned cg = 0;
+            while (isdigit((unsigned char)*cg_val) && cg < 100) {
+                cg = cg * 10u + (unsigned)(*cg_val - '0');
+                ++cg_val;
+            }
+            if (!is_json_delim(*cg_val) || cg < 1 || cg > ECARD_GRADE_COUNT) {
+                return make_error(resp_buf, resp_size, 400, "invalid_curriculum");
+            }
+
+            uint8_t parsed_grades[ECARD_GRADE_COUNT + 2] = {0};
+            uint8_t parsed_count = 0;
+            const char *arr = find_json_value(body, "grades");
+            if (arr) {
+                if (*arr != '[') {
+                    return make_error(resp_buf, resp_size, 400, "invalid_curriculum");
+                }
+                ++arr;
+                arr = skip_ws(arr);
+                while (*arr && *arr != ']') {
+                    if (!isdigit((unsigned char)*arr)) {
+                        return make_error(resp_buf, resp_size, 400, "invalid_curriculum");
+                    }
+                    unsigned gv = 0;
+                    while (isdigit((unsigned char)*arr) && gv < 100) {
+                        gv = gv * 10u + (unsigned)(*arr - '0');
+                        ++arr;
+                    }
+                    if (gv < 1 || gv > ECARD_GRADE_COUNT ||
+                        parsed_count >= ECARD_MAX_ACTIVE_GRADES) {
+                        return make_error(resp_buf, resp_size, 400, "invalid_curriculum");
+                    }
+                    parsed_grades[parsed_count++] = (uint8_t)gv;
+                    arr = skip_ws(arr);
+                    if (*arr == ',') {
+                        ++arr;
+                        arr = skip_ws(arr);
+                        if (*arr == ']') {
+                            return make_error(resp_buf, resp_size, 400, "invalid_curriculum");
+                        }
+                    } else if (*arr != ']') {
+                        return make_error(resp_buf, resp_size, 400, "invalid_curriculum");
+                    }
+                }
+                if (*arr != ']') {
+                    return make_error(resp_buf, resp_size, 400, "invalid_curriculum");
+                }
+            }
+
+            if (!ecard_setup_save_curriculum((uint8_t)cg,
+                                             parsed_count > 0 ? parsed_grades : NULL,
+                                             parsed_count)) {
+                return make_error(resp_buf, resp_size, 400, "invalid_curriculum");
+            }
+            if (out_ui_dirty) *out_ui_dirty = true;
+        }
+
+        uint8_t active[ECARD_MAX_ACTIVE_GRADES] = {0};
+        const uint8_t count = ecard_cards_active_grades(active);
+        str_writer_t w;
+        sw_init(&w, resp_buf, resp_size);
+        sw_raw(&w, "{\"ok\":true,\"current_grade\":");
+        sw_uint(&w, ecard_cards_current_grade());
+        sw_raw(&w, ",\"max_grades\":3,\"grades\":[");
+        for (uint8_t i = 0; i < count; ++i) {
+            if (i > 0) sw_raw(&w, ",");
+            sw_uint(&w, active[i]);
+        }
+        sw_raw(&w, "]}");
         return finish_json(&w, resp_buf, resp_size);
     }
 

@@ -53,6 +53,14 @@ const char *ecard_setup_get_relay_url(void);
 /** 保存中转服务基地址（须以 http:// 或 https:// 开头，传空串清空）。 */
 bool ecard_setup_save_relay_url(const char *url);
 
+/** 保存家长配置的当前年级与设备保留年级列表（grades 为 NULL 或 count==0 时按前后一年默认窗口计算，最多保留 3 个年级）。 */
+bool ecard_setup_save_curriculum(uint8_t current_grade,
+                                 const uint8_t *grades,
+                                 uint8_t grade_count);
+
+/** 是否已由家长显式保存过题库年级配置。 */
+bool ecard_setup_has_custom_curriculum(void);
+
 /** 清除全部配置（设备重置）。 */
 bool ecard_setup_clear(void);
 

@@ -34,11 +34,14 @@ bool ecard_opus_arena_busy(void);
 unsigned ecard_opus_arena_size(void);
 
 /**
- * @brief 在 Opus 编解码空闲时借用 25 KB 静态后备区（供首页留言录音复用，避免堆碎片）。
+ * @brief 在 Opus 编解码空闲时借用 25 KB 静态后备区（供首页留言录音与配网门户复用，避免堆碎片）。
  *
- * @return true 借用成功；false 后备区正忙或处于编码器打开窗口
+ * @return true 借用成功；false 后备区正忙或处于编解码器打开窗口
  */
 bool ecard_opus_arena_borrow(uint8_t **out_buf, size_t *out_bytes);
+
+/** 判断指针是否落在静态后备区内部（便于调用方区分 arena 归还与 free）。 */
+bool ecard_opus_arena_owns(const void *ptr);
 
 /** 归还由 ecard_opus_arena_borrow() 借出的静态后备区。 */
 void ecard_opus_arena_return(const void *buf);

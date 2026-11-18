@@ -79,6 +79,9 @@ bool ecard_xiaozhi_listen_had_audio(void);
 /** 结束本轮聆听（采音结束后调用，服务端开始识别）。 */
 void ecard_xiaozhi_listen_stop(void);
 
+/** 取消本轮聆听并丢弃缓存帧（无有效人声或用户主动取消，不触发服务端识别与回复）。 */
+void ecard_xiaozhi_listen_cancel(void);
+
 /** 发送一帧 Opus 音频（type 0 二进制帧）。 */
 void ecard_xiaozhi_send_audio(const uint8_t *opus, size_t len);
 
@@ -102,6 +105,18 @@ void ecard_xiaozhi_feed_mic_pcm(const int16_t *pcm, size_t samples);
 
 /** 清空未凑满一帧的麦克风残留样本（开始新一轮录音时调用）。 */
 void ecard_xiaozhi_reset_mic(void);
+
+/** 本轮聆听是否喂入过麦克风 PCM 数据（区分真机采音与纯状态机单测）。 */
+bool ecard_xiaozhi_mic_active(void);
+
+/** 最近一帧麦克风音量振幅（0..100），用于驱动录音弹层波形。 */
+uint8_t ecard_xiaozhi_mic_amplitude(void);
+
+/** 本轮聆听是否检测到有效人声（>= 200 ms 连续语音）。 */
+bool ecard_xiaozhi_mic_voice_detected(void);
+
+/** 本轮聆听是否满足人声后尾部静音端点（>= 1500 ms），可自动提交。 */
+bool ecard_xiaozhi_mic_vad_complete(void);
 
 /** 服务端 TTS 是否正在播放或还有缓存音频。 */
 bool ecard_xiaozhi_is_speaking(void);

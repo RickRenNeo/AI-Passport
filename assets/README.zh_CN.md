@@ -28,9 +28,9 @@
 | 源文件 URL | `https://github.com/notofonts/noto-cjk/raw/Sans2.004/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf` |
 | 源文件 SHA-256 | `2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b` |
 | 许可 | SIL Open Font License 1.1，[`fonts/LICENSE-NotoSansCJK.txt`](fonts/LICENSE-NotoSansCJK.txt) |
-| 转换器 | `lv_font_conv` 1.5.3，`--bpp 2 --format lvgl --no-compress`（4 级灰阶，位图体积减半） |
-| 覆盖范围 | 可打印 ASCII + eCard 源码中的全部非 ASCII 字符 + 界面符号；12/16/22 px 额外包含 GB2312 一级字库，确保用户配置的学校、班级、姓名可正常显示 |
-| 编译后大小 | 约 1.0 MiB 字库数据，位于 Flash；应用 2.66 MB，双 OTA 槽位各 4.03 MB |
+| 转换器 | `lv_font_conv` 1.5.3，`--bpp 2 --format lvgl`（4 级灰阶 + `CONFIG_LV_USE_FONT_COMPRESSED=y` RLE 无损压缩） |
+| 覆盖范围 | 可打印 ASCII + eCard 源码及 `tools/ecard_curriculum_data.py` 中的全部非 ASCII 字符 + 界面符号；12/16/22 px 额外包含 GB2312 一级字库，确保用户配置的学校、班级、姓名可正常显示；9 px 与 48 px 仅含 ASCII |
+| 编译后大小 | 约 0.65 MiB 压缩字库数据，位于 Flash（零系统堆开销） |
 
 在仓库根目录重新生成已提交的字库源码：
 
@@ -79,20 +79,6 @@ python3 tools/generate_ecard_photo.py
 - 与当前 BSP 音频路径匹配时优先采用 16 kHz、16 位单声道 PCM。
 - 嵌入音频前评估 Flash 与内部 RAM 成本；长录音应流式或分块。
 - 无再分发许可不提交媒体文件。
-
-### eCard 演示语音
-
-[`sounds/ecard_demo_voice.c`](sounds/ecard_demo_voice.c) 是网络留言暂无音频负载时
-使用的 7.3 秒演示留言：4-bit IMA-ADPCM、16 kHz 单声道，解码初值为 0/0，约占 59 KB Flash。
-
-| 项目 | 内容 |
-| --- | --- |
-| 文案 | `远豪，妈妈给你留了一条语音，放学记得早点回家，写完作业再玩哦。` |
-| 音色 | macOS `say -v Tingting`（zh_CN）合成占位，不是真人录音 |
-| 生成 | `python3 tools/generate_ecard_demo_voice.py`（需要 macOS `say`/`afconvert`） |
-| 目标 | 由 `main/CMakeLists.txt` 编入 `main`，回放由 `main/ecard_voice.c` 处理 |
-
-该片段仅作演示，接入小智 TTS 后应替换为真实语音。
 
 ## 电池参数（battery）
 

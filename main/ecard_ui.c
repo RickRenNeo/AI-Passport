@@ -59,12 +59,18 @@ typedef struct lv_font_t lv_font_t;
 /* 跨模式状态                                                                */
 /* ------------------------------------------------------------------------- */
 
+#define PICK_VIEW_ROWS 5
+
 static ecard_ui_page_t s_page = ECARD_UI_PAGE_HOME;
 static ecard_ui_modal_t s_modal = ECARD_UI_MODAL_NONE;
 static uint8_t s_menu_selection = 0;
 static uint8_t s_msg_selection = 0;
+static ecard_pick_step_t s_pick_step = ECARD_PICK_STEP_GRADE;
 static uint8_t s_grade_selection = 0;
+static uint8_t s_deck_selection = 0;
+static uint8_t s_deck_scroll = 0;
 static uint8_t s_deck_grade = 1;
+static char s_deck_title[48] = {0};
 static uint32_t s_idle_elapsed_ms = 0;
 static bool s_is_dimmed = false;
 static bool s_screen_off = false;
@@ -82,6 +88,8 @@ static bool s_has_playing_msg = false;
 static char s_pomo_override_hint[64] = {0};
 static uint32_t s_pomo_hint_ttl_ms = 0;
 static bool s_pomo_hint_persistent = false;
+static bool s_pomo_ai_paused = false;
+static uint8_t s_modal_remaining_sec = 0;
 
 void ecard_ui_format_pomodoro_points(char *out, size_t out_size) {
     if (!out || out_size == 0) return;
@@ -174,12 +182,12 @@ static lv_obj_t *s_lbl_quiz_score = NULL;
 static lv_obj_t *s_lbl_quiz_caption = NULL;
 static lv_obj_t *s_lbl_quiz_stars = NULL;
 
-/* 年级选择 */
-static lv_obj_t *s_grade_rows[ECARD_GRADE_COUNT];
-static lv_obj_t *s_grade_tiles[ECARD_GRADE_COUNT];
-static lv_obj_t *s_grade_glyphs[ECARD_GRADE_COUNT];
-static lv_obj_t *s_grade_titles[ECARD_GRADE_COUNT];
-static lv_obj_t *s_grade_subs[ECARD_GRADE_COUNT];
+/* 二级题库选择（选年级 <=3 行 / 选分组单元 5 行滚动视口共用） */
+static lv_obj_t *s_pick_rows[PICK_VIEW_ROWS];
+static lv_obj_t *s_pick_tiles[PICK_VIEW_ROWS];
+static lv_obj_t *s_pick_glyphs[PICK_VIEW_ROWS];
+static lv_obj_t *s_pick_titles[PICK_VIEW_ROWS];
+static lv_obj_t *s_pick_subs[PICK_VIEW_ROWS];
 
 /* 番茄钟小猫书房 */
 static lv_obj_t *s_pomo_phase = NULL;
@@ -479,11 +487,11 @@ static void reset_page_pointers(void) {
     s_lbl_fc_source = NULL;
     s_lbl_fc_score = NULL;
     s_lbl_fc_caption = NULL;
-    memset(s_grade_rows, 0, sizeof(s_grade_rows));
-    memset(s_grade_tiles, 0, sizeof(s_grade_tiles));
-    memset(s_grade_glyphs, 0, sizeof(s_grade_glyphs));
-    memset(s_grade_titles, 0, sizeof(s_grade_titles));
-    memset(s_grade_subs, 0, sizeof(s_grade_subs));
+    memset(s_pick_rows, 0, sizeof(s_pick_rows));
+    memset(s_pick_tiles, 0, sizeof(s_pick_tiles));
+    memset(s_pick_glyphs, 0, sizeof(s_pick_glyphs));
+    memset(s_pick_titles, 0, sizeof(s_pick_titles));
+    memset(s_pick_subs, 0, sizeof(s_pick_subs));
     s_lbl_fc_explain = NULL;
     s_lbl_fc_example = NULL;
     s_lbl_fc_example_cn = NULL;
@@ -1261,8 +1269,13 @@ static void update_pomodoro_content(void) {
              (unsigned)ecard_pomodoro_focus_minutes());
     const char *tip = idle_tip;
     if (phase == ECARD_POMODORO_FOCUS) {
-        tip = running ? "小猫陪你认真学习中 · 加油！"
-                      : "已暂停 · 按 OK 键继续学习";
+        if (running) {
+            tip = "小猫陪你认真学习中 · 加油！";
+        } else if (s_pomo_ai_paused) {
+            tip = "与小智交流中 · 计时已暂停";
+        } else {
+            tip = "已暂停 · 按 OK 键继续学习";
+        }
     } else if (phase == ECARD_POMODORO_BREAK || phase == ECARD_POMODORO_LONG_BREAK) {
         tip = "休息一下，站起来喝口水吧";
     } else if (phase == ECARD_POMODORO_DONE) {
@@ -1300,7 +1313,7 @@ static void update_pomodoro_content(void) {
 }
 
 /* ------------------------------------------------------------------------- */
-/* 年级选择                                                                  */
+/* 二级题库选择：第 1 步选保留年级（<=3 个），第 2 步选分组/单元（5 行滚动）     */
 /* ------------------------------------------------------------------------- */
 
 static const char *grade_name(uint8_t grade) {
@@ -1309,75 +1322,159 @@ static const char *grade_name(uint8_t grade) {
     return names[grade - 1];
 }
 
-static void apply_grade_selection(void) {
-    for (int i = 0; i < ECARD_GRADE_COUNT; ++i) {
-        lv_obj_t *row = s_grade_rows[i];
-        if (!row) continue;
-        bool selected = (i == (int)s_grade_selection);
+static void apply_pick_row_style(int slot, bool selected) {
+    lv_obj_t *row = s_pick_rows[slot];
+    if (!row) return;
+    lv_obj_set_style_border_width(row, selected ? 0 : 1, 0);
+    lv_obj_set_style_border_color(row, lv_color_hex(C_LINE), 0);
+    lv_obj_set_style_bg_color(row, lv_color_hex(selected ? C_NAVY : C_SURFACE), 0);
+    lv_obj_set_style_bg_grad_color(row, lv_color_hex(C_NAVY_HI), 0);
+    lv_obj_set_style_bg_grad_dir(row, selected ? LV_GRAD_DIR_VER : LV_GRAD_DIR_NONE, 0);
+    if (s_pick_tiles[slot]) {
+        lv_obj_set_style_bg_color(s_pick_tiles[slot],
+                                  lv_color_hex(selected ? 0x2A517C : C_BLUE_SOFT), 0);
+    }
+    if (s_pick_glyphs[slot]) {
+        lv_obj_set_style_text_color(s_pick_glyphs[slot],
+                                    lv_color_hex(selected ? C_SURFACE : C_BLUE), 0);
+    }
+    if (s_pick_titles[slot]) {
+        lv_obj_set_style_text_color(s_pick_titles[slot],
+                                    lv_color_hex(selected ? C_SURFACE : C_INK), 0);
+    }
+    if (s_pick_subs[slot]) {
+        lv_obj_set_style_text_color(s_pick_subs[slot],
+                                    lv_color_hex(selected ? C_ON_NAVY : C_MUTED), 0);
+    }
+}
 
-        lv_obj_set_style_border_width(row, selected ? 0 : 1, 0);
-        lv_obj_set_style_border_color(row, lv_color_hex(C_LINE), 0);
-        lv_obj_set_style_bg_color(row, lv_color_hex(selected ? C_NAVY : C_SURFACE), 0);
-        lv_obj_set_style_bg_grad_color(row, lv_color_hex(C_NAVY_HI), 0);
-        lv_obj_set_style_bg_grad_dir(row, selected ? LV_GRAD_DIR_VER : LV_GRAD_DIR_NONE, 0);
-        if (s_grade_tiles[i]) {
-            lv_obj_set_style_bg_color(s_grade_tiles[i],
-                                      lv_color_hex(selected ? 0x2A517C : C_BLUE_SOFT), 0);
+static void apply_grade_selection(void) {
+    for (int i = 0; i < PICK_VIEW_ROWS; ++i) {
+        if (!s_pick_rows[i]) continue;
+        apply_pick_row_style(i, i == (int)s_grade_selection);
+    }
+}
+
+static void refresh_deck_viewport(ecard_card_kind_t kind) {
+    const bool poem = (kind == ECARD_CARD_POEM);
+    const uint8_t grade = ecard_ui_pick_selected_grade();
+    const uint8_t deck_count = ecard_cards_deck_count(kind, grade);
+    for (int slot = 0; slot < PICK_VIEW_ROWS; ++slot) {
+        if (!s_pick_rows[slot]) continue;
+        const uint8_t idx = (uint8_t)(s_deck_scroll + slot);
+        if (idx >= deck_count) {
+            lv_obj_add_flag(s_pick_rows[slot], LV_OBJ_FLAG_HIDDEN);
+            continue;
         }
-        if (s_grade_glyphs[i]) {
-            lv_obj_set_style_text_color(s_grade_glyphs[i],
-                                        lv_color_hex(selected ? C_SURFACE : C_BLUE), 0);
+        lv_obj_clear_flag(s_pick_rows[slot], LV_OBJ_FLAG_HIDDEN);
+        ecard_deck_info_t info;
+        memset(&info, 0, sizeof(info));
+        (void)ecard_cards_deck_info(kind, grade, idx, &info);
+
+        char num_buf[8];
+        snprintf(num_buf, sizeof(num_buf), "%u", (unsigned)(idx + 1));
+        label_set_text(s_pick_glyphs[slot], num_buf);
+        label_set_text(s_pick_titles[slot], info.title);
+
+        char sub_buf[72];
+        if (poem) {
+            snprintf(sub_buf, sizeof(sub_buf), "%s", info.subtitle);
+        } else {
+            snprintf(sub_buf, sizeof(sub_buf), "%u 词 · %s",
+                     (unsigned)info.card_count, info.subtitle);
         }
-        if (s_grade_titles[i]) {
-            lv_obj_set_style_text_color(s_grade_titles[i],
-                                        lv_color_hex(selected ? C_SURFACE : C_INK), 0);
-        }
-        if (s_grade_subs[i]) {
-            lv_obj_set_style_text_color(s_grade_subs[i],
-                                        lv_color_hex(selected ? C_ON_NAVY : C_MUTED), 0);
-        }
+        label_set_text(s_pick_subs[slot], sub_buf);
+        apply_pick_row_style(slot, idx == s_deck_selection);
     }
 }
 
 static void create_pick_page(ecard_card_kind_t kind) {
     const bool poem = (kind == ECARD_CARD_POEM);
     s_screen = create_page_root();
-    create_page_header(s_screen, poem ? "古诗接句" : "英语单词", "选择年级");
 
-    for (int i = 0; i < ECARD_GRADE_COUNT; ++i) {
-        const uint8_t grade = (uint8_t)(i + 1);
-        uint8_t count = 0;
-        if (poem) {
-            (void)ecard_cards_poems(grade, &count);
-        } else {
-            (void)ecard_cards_words(grade, &count);
+    if (s_pick_step == ECARD_PICK_STEP_GRADE) {
+        create_page_header(s_screen, poem ? "古诗接句" : "英语单词", "选年级");
+        uint8_t grades[ECARD_MAX_ACTIVE_GRADES] = {0};
+        uint8_t n = ecard_cards_active_grades(grades);
+        if (n > ECARD_MAX_ACTIVE_GRADES) n = ECARD_MAX_ACTIVE_GRADES;
+        const uint8_t cur_grade = ecard_cards_current_grade();
+
+        for (uint8_t i = 0; i < n; ++i) {
+            const uint8_t grade = grades[i];
+            const uint8_t decks = ecard_cards_deck_count(kind, grade);
+            const uint16_t total = ecard_cards_grade_card_total(kind, grade);
+
+            const int y = 66 + (int)i * 72;
+            lv_obj_t *row = make_box(s_screen, 16, y, 208, 64, C_SURFACE, C_LINE, 14);
+            lv_obj_t *tile = make_box(row, 10, 14, 36, 36, C_BLUE_SOFT, NO_BORDER, 10);
+            char digit[4];
+            snprintf(digit, sizeof(digit), "%u", (unsigned)grade);
+            lv_obj_t *glyph = make_label(tile, digit, &ecard_font_22, C_BLUE, 0, 5, 36,
+                                         LV_TEXT_ALIGN_CENTER);
+
+            char title[32];
+            if (grade == cur_grade) {
+                snprintf(title, sizeof(title), "%s年级 · 当前", grade_name(grade));
+            } else {
+                snprintf(title, sizeof(title), "%s年级", grade_name(grade));
+            }
+            lv_obj_t *lbl_title = make_label(row, title, &ecard_font_16, C_INK, 54, 10, 132,
+                                             LV_TEXT_ALIGN_LEFT);
+
+            char sub[48];
+            if (poem) {
+                snprintf(sub, sizeof(sub), "共 %u 组 · %u 篇古诗文",
+                         (unsigned)decks, (unsigned)total);
+            } else {
+                snprintf(sub, sizeof(sub), "共 %u 单元 · %u 个单词",
+                         (unsigned)decks, (unsigned)total);
+            }
+            lv_obj_t *lbl_sub = make_label(row, sub, &ecard_font_12, C_MUTED, 54, 36, 136,
+                                           LV_TEXT_ALIGN_LEFT);
+            make_label(row, "›", &ecard_font_16, C_FAINT, 188, 22, 16, LV_TEXT_ALIGN_CENTER);
+
+            s_pick_rows[i] = row;
+            s_pick_tiles[i] = tile;
+            s_pick_glyphs[i] = glyph;
+            s_pick_titles[i] = lbl_title;
+            s_pick_subs[i] = lbl_sub;
         }
 
-        int y = 62 + i * 40;
-        lv_obj_t *row = make_box(s_screen, 16, y, 208, 36, C_SURFACE, C_LINE, 11);
-        lv_obj_t *tile = make_box(row, 7, 4, 28, 28, C_BLUE_SOFT, NO_BORDER, 8);
-        static const char *digits[ECARD_GRADE_COUNT] = {"1", "2", "3", "4", "5", "6"};
-        lv_obj_t *glyph = make_label(tile, digits[i], &ecard_font_16, C_BLUE, 0, 5, 28,
-                                     LV_TEXT_ALIGN_CENTER);
-        char title[24];
-        snprintf(title, sizeof(title), "%s年级", grade_name(grade));
-        lv_obj_t *lbl_title = make_label(row, title, &ecard_font_16, C_INK, 42, 1, 110,
-                                         LV_TEXT_ALIGN_LEFT);
-        char sub[32];
-        snprintf(sub, sizeof(sub), "%u 张 · 按 OK 开始", (unsigned)count);
-        lv_obj_t *lbl_sub = make_label(row, sub, &ecard_font_12, C_MUTED, 42, 20, 148,
-                                       LV_TEXT_ALIGN_LEFT);
-        make_label(row, "›", &ecard_font_16, C_FAINT, 186, 9, 16, LV_TEXT_ALIGN_CENTER);
-
-        s_grade_rows[i] = row;
-        s_grade_tiles[i] = tile;
-        s_grade_glyphs[i] = glyph;
-        s_grade_titles[i] = lbl_title;
-        s_grade_subs[i] = lbl_sub;
+        create_page_hint(s_screen,
+                         poem ? "UP/DOWN 选年级 · OK 选分组" : "UP/DOWN 选年级 · OK 选单元");
+        apply_grade_selection();
+        return;
     }
 
-    create_page_hint(s_screen, "UP / DOWN 选年级 · OK 开始");
-    apply_grade_selection();
+    const uint8_t grade = ecard_ui_pick_selected_grade();
+    const uint8_t deck_count = ecard_cards_deck_count(kind, grade);
+    char hdr_sub[36];
+    snprintf(hdr_sub, sizeof(hdr_sub), "%s年级 · 共 %u %s", grade_name(grade),
+             (unsigned)deck_count, poem ? "组" : "单元");
+    create_page_header(s_screen, poem ? "古诗接句" : "英语单词", hdr_sub);
+
+    const uint8_t rows = (deck_count < PICK_VIEW_ROWS) ? deck_count : PICK_VIEW_ROWS;
+    for (uint8_t slot = 0; slot < rows; ++slot) {
+        const int y = 62 + (int)slot * 46;
+        lv_obj_t *row = make_box(s_screen, 16, y, 208, 42, C_SURFACE, C_LINE, 11);
+        lv_obj_t *tile = make_box(row, 7, 6, 30, 30, C_BLUE_SOFT, NO_BORDER, 8);
+        lv_obj_t *glyph = make_label(tile, "", &ecard_font_12, C_BLUE, 0, 8, 30,
+                                     LV_TEXT_ALIGN_CENTER);
+        lv_obj_t *lbl_title = make_label(row, "", &ecard_font_16, C_INK, 43, 3, 142,
+                                         LV_TEXT_ALIGN_LEFT);
+        lv_obj_t *lbl_sub = make_label(row, "", &ecard_font_12, C_MUTED, 43, 23, 144,
+                                       LV_TEXT_ALIGN_LEFT);
+        make_label(row, "›", &ecard_font_16, C_FAINT, 188, 12, 16, LV_TEXT_ALIGN_CENTER);
+
+        s_pick_rows[slot] = row;
+        s_pick_tiles[slot] = tile;
+        s_pick_glyphs[slot] = glyph;
+        s_pick_titles[slot] = lbl_title;
+        s_pick_subs[slot] = lbl_sub;
+    }
+
+    create_page_hint(s_screen, "UP/DOWN 选择 · OK 开始 · 长按返回");
+    refresh_deck_viewport(kind);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1422,9 +1519,13 @@ static const lv_font_t *fc_fit_font(const char *text, int32_t width, int32_t max
 static void create_flashcard_page(ecard_card_kind_t kind) {
     const bool poem = (kind == ECARD_CARD_POEM);
     s_screen = create_page_root();
-    char subtitle[32];
-    snprintf(subtitle, sizeof(subtitle), "%s年级 · %s", grade_name(s_deck_grade),
-             poem ? "翻面读下句" : "翻面看释义");
+    char subtitle[64];
+    if (s_deck_title[0]) {
+        snprintf(subtitle, sizeof(subtitle), "%s年级 · %s", grade_name(s_deck_grade), s_deck_title);
+    } else {
+        snprintf(subtitle, sizeof(subtitle), "%s年级 · %s", grade_name(s_deck_grade),
+                 poem ? "翻面读下句" : "翻面看释义");
+    }
     create_page_header(s_screen, poem ? "古诗接句" : "英语单词", subtitle);
 
     lv_obj_t *card = make_box(s_screen, 16, FC_CARD_Y, 208, FC_CARD_H,
@@ -1470,7 +1571,7 @@ static void create_flashcard_page(ecard_card_kind_t kind) {
                                   LV_TEXT_ALIGN_CENTER);
     make_label(s_fc_result, "★★★", &ecard_font_22, C_AMBER, 0, 166, 208, LV_TEXT_ALIGN_CENTER);
 
-    create_page_hint(s_screen, "OK 翻面 · 长按退出");
+    create_page_hint(s_screen, "OK 翻面 · 长按返回");
 }
 
 static void update_flashcard_content(void) {
@@ -1485,7 +1586,7 @@ static void update_flashcard_content(void) {
                  (unsigned)ecard_flashcard_total());
         label_set_text(s_lbl_fc_score, buf);
         label_set_text(s_lbl_fc_caption, "全部掌握，真棒！");
-        if (s_lbl_hint) label_set_text(s_lbl_hint, "按 OK 返回菜单");
+        if (s_lbl_hint) label_set_text(s_lbl_hint, "按 OK 返回选题库");
         return;
     }
 
@@ -2423,13 +2524,54 @@ static void create_pair_page(void) {
 /* 公共 API                                                                  */
 /* ------------------------------------------------------------------------- */
 
+static void sync_default_grade_slot(void) {
+    uint8_t grades[ECARD_MAX_ACTIVE_GRADES] = {0};
+    const uint8_t n = ecard_cards_active_grades(grades);
+    const uint8_t cur = ecard_cards_current_grade();
+    s_grade_selection = 0;
+    for (uint8_t i = 0; i < n; ++i) {
+        if (grades[i] == cur) {
+            s_grade_selection = i;
+            break;
+        }
+    }
+}
+
+static void clamp_deck_scroll(uint8_t deck_count) {
+    if (deck_count == 0) {
+        s_deck_selection = 0;
+        s_deck_scroll = 0;
+        return;
+    }
+    if (s_deck_selection >= deck_count) {
+        s_deck_selection = (uint8_t)(deck_count - 1);
+    }
+    if (deck_count <= PICK_VIEW_ROWS) {
+        s_deck_scroll = 0;
+    } else {
+        if (s_deck_selection < s_deck_scroll) {
+            s_deck_scroll = s_deck_selection;
+        } else if (s_deck_selection >= (uint8_t)(s_deck_scroll + PICK_VIEW_ROWS)) {
+            s_deck_scroll = (uint8_t)(s_deck_selection - PICK_VIEW_ROWS + 1);
+        }
+        const uint8_t max_scroll = (uint8_t)(deck_count - PICK_VIEW_ROWS);
+        if (s_deck_scroll > max_scroll) {
+            s_deck_scroll = max_scroll;
+        }
+    }
+}
+
 void ecard_ui_reset_navigation(void) {
     s_page = ECARD_UI_PAGE_HOME;
     s_modal = ECARD_UI_MODAL_NONE;
     s_menu_selection = 0;
     s_msg_selection = 0;
-    s_grade_selection = 0;
-    s_deck_grade = 1;
+    s_pick_step = ECARD_PICK_STEP_GRADE;
+    sync_default_grade_slot();
+    s_deck_selection = 0;
+    s_deck_scroll = 0;
+    s_deck_grade = ecard_cards_current_grade();
+    s_deck_title[0] = '\0';
     s_idle_elapsed_ms = 0;
     s_is_dimmed = false;
     s_has_playing_msg = false;
@@ -2438,6 +2580,8 @@ void ecard_ui_reset_navigation(void) {
     s_pomo_hint_persistent = false;
     s_pomo_hint_ttl_ms = 0;
     s_pomo_override_hint[0] = '\0';
+    s_pomo_ai_paused = false;
+    s_modal_remaining_sec = 0;
     ecard_cat_room_set_pairing_active(false);
 }
 
@@ -2482,6 +2626,41 @@ void ecard_ui_show_page(ecard_ui_page_t page) {
     if (page < ECARD_UI_PAGE_HOME || page > ECARD_UI_PAGE_PAIR) return;
     if (s_modal != ECARD_UI_MODAL_NONE) return;
 
+    const ecard_ui_page_t prev_page = s_page;
+    if (page == ECARD_UI_PAGE_POEM_PICK || page == ECARD_UI_PAGE_WORD_PICK) {
+        const ecard_card_kind_t kind =
+            (page == ECARD_UI_PAGE_POEM_PICK) ? ECARD_CARD_POEM : ECARD_CARD_WORD;
+        const bool from_flashcard =
+            (page == ECARD_UI_PAGE_POEM_PICK && prev_page == ECARD_UI_PAGE_POEM) ||
+            (page == ECARD_UI_PAGE_WORD_PICK && prev_page == ECARD_UI_PAGE_WORD);
+        uint8_t grades[ECARD_MAX_ACTIVE_GRADES] = {0};
+        const uint8_t active_n = ecard_cards_active_grades(grades);
+        if (from_flashcard) {
+            s_pick_step = ECARD_PICK_STEP_DECK;
+            if (s_grade_selection >= active_n) {
+                sync_default_grade_slot();
+            }
+            clamp_deck_scroll(ecard_cards_deck_count(kind, ecard_ui_pick_selected_grade()));
+        } else if (prev_page == page) {
+            if (s_grade_selection >= active_n) {
+                sync_default_grade_slot();
+            }
+            if (s_pick_step == ECARD_PICK_STEP_DECK) {
+                const uint8_t dc = ecard_cards_deck_count(kind, ecard_ui_pick_selected_grade());
+                if (dc == 0) {
+                    s_pick_step = ECARD_PICK_STEP_GRADE;
+                } else {
+                    clamp_deck_scroll(dc);
+                }
+            }
+        } else {
+            s_pick_step = ECARD_PICK_STEP_GRADE;
+            sync_default_grade_slot();
+            s_deck_selection = 0;
+            s_deck_scroll = 0;
+        }
+    }
+
     s_page = page;
     s_pomo_hint_persistent = false;
     s_pomo_hint_ttl_ms = 0;
@@ -2489,7 +2668,7 @@ void ecard_ui_show_page(ecard_ui_page_t page) {
     ecard_cat_room_set_pairing_active(page == ECARD_UI_PAGE_PAIR);
 
 #if HAS_LVGL_RUNTIME
-    /* 先释放旧屏幕再创建新页面：避免菜单页(30+ 控件)与选年级页(53 控件)同时驻留 LVGL 池，
+    /* 先释放旧屏幕再创建新页面：避免菜单页(30+ 控件)与选题库页同时驻留 LVGL 池，
      * 消除跨页碎片导致的 lv_array_resize 分配失败断言死循环（ecard_input 看门狗卡死）。 */
     reset_page_pointers();
     if (s_screen) {
@@ -2566,24 +2745,85 @@ void ecard_ui_setup_refresh(void) {
 #endif
 }
 
+ecard_pick_step_t ecard_ui_pick_step(void) {
+    return s_pick_step;
+}
+
+void ecard_ui_pick_set_step(ecard_pick_step_t step) {
+    s_pick_step = (step == ECARD_PICK_STEP_DECK) ? ECARD_PICK_STEP_DECK : ECARD_PICK_STEP_GRADE;
+    if (s_pick_step == ECARD_PICK_STEP_DECK) {
+        s_deck_selection = 0;
+        s_deck_scroll = 0;
+    }
+    if (s_page == ECARD_UI_PAGE_POEM_PICK || s_page == ECARD_UI_PAGE_WORD_PICK) {
+        ecard_ui_show_page(s_page);
+    }
+}
+
+uint8_t ecard_ui_pick_selected_grade(void) {
+    uint8_t grades[ECARD_MAX_ACTIVE_GRADES] = {0};
+    const uint8_t n = ecard_cards_active_grades(grades);
+    if (n == 0) return ecard_cards_current_grade();
+    const uint8_t slot = (s_grade_selection < n) ? s_grade_selection : 0;
+    return grades[slot];
+}
+
 void ecard_ui_set_deck_grade(uint8_t grade) {
     if (grade < 1) grade = 1;
     if (grade > ECARD_GRADE_COUNT) grade = ECARD_GRADE_COUNT;
     s_deck_grade = grade;
+    s_deck_title[0] = '\0';
+}
+
+void ecard_ui_set_deck_meta(uint8_t grade, const char *deck_title) {
+    ecard_ui_set_deck_grade(grade);
+    if (deck_title && deck_title[0]) {
+        snprintf(s_deck_title, sizeof(s_deck_title), "%s", deck_title);
+    }
 }
 
 void ecard_ui_grade_move(int delta) {
-    int count = ECARD_GRADE_COUNT;
+    uint8_t grades[ECARD_MAX_ACTIVE_GRADES] = {0};
+    int count = (int)ecard_cards_active_grades(grades);
+    if (count <= 0) count = 1;
     int next = ((int)s_grade_selection + delta) % count;
     if (next < 0) next += count;
     s_grade_selection = (uint8_t)next;
+    s_deck_selection = 0;
+    s_deck_scroll = 0;
 #if HAS_LVGL_RUNTIME
-    apply_grade_selection();
+    if (s_pick_step == ECARD_PICK_STEP_GRADE) {
+        apply_grade_selection();
+    }
 #endif
 }
 
 uint8_t ecard_ui_grade_selection(void) {
     return s_grade_selection;
+}
+
+uint8_t ecard_ui_deck_selection(void) {
+    return s_deck_selection;
+}
+
+void ecard_ui_deck_move(int delta) {
+    const ecard_card_kind_t kind =
+        (s_page == ECARD_UI_PAGE_WORD_PICK || s_page == ECARD_UI_PAGE_WORD)
+            ? ECARD_CARD_WORD
+            : ECARD_CARD_POEM;
+    const uint8_t grade = ecard_ui_pick_selected_grade();
+    const int count = (int)ecard_cards_deck_count(kind, grade);
+    if (count <= 0) return;
+    int next = ((int)s_deck_selection + delta) % count;
+    if (next < 0) next += count;
+    s_deck_selection = (uint8_t)next;
+    clamp_deck_scroll((uint8_t)count);
+#if HAS_LVGL_RUNTIME
+    if ((s_page == ECARD_UI_PAGE_POEM_PICK || s_page == ECARD_UI_PAGE_WORD_PICK) &&
+        s_pick_step == ECARD_PICK_STEP_DECK) {
+        refresh_deck_viewport(kind);
+    }
+#endif
 }
 
 void ecard_ui_menu_move(int delta) {
@@ -2661,6 +2901,8 @@ void ecard_ui_refresh_content(void) {
         update_menu_voice_sub();
     } else if (s_page == ECARD_UI_PAGE_QUIZ) {
         update_quiz_content();
+    } else if (s_page == ECARD_UI_PAGE_POEM_PICK || s_page == ECARD_UI_PAGE_WORD_PICK) {
+        ecard_ui_show_page(s_page);
     } else if (s_page == ECARD_UI_PAGE_POMODORO) {
         update_pomodoro_content();
     } else if (s_page == ECARD_UI_PAGE_DEVICE) {
@@ -2717,6 +2959,7 @@ void ecard_ui_show_recording_modal(uint8_t remaining_sec, uint8_t audio_amplitud
     const bool needs_create = (s_modal != ECARD_UI_MODAL_RECORDING) || !s_modal_container;
 #endif
     s_modal = ECARD_UI_MODAL_RECORDING;
+    s_modal_remaining_sec = remaining_sec;
 #if HAS_LVGL_RUNTIME
     if (needs_create) {
         create_recording_modal();
@@ -2749,8 +2992,8 @@ void ecard_ui_show_ai_listen_modal(uint8_t remaining_sec, uint8_t audio_amplitud
     if (s_lbl_modal_kicker) label_set_text(s_lbl_modal_kicker, "AI 学习助手");
     // 避开生僻字（该字不在 GB2312 一级字库），保证内置点阵包含全部界面文字。
     if (s_lbl_modal_title) label_set_text(s_lbl_modal_title, "小智正在听");
-    if (s_lbl_modal_hint) label_set_text(s_lbl_modal_hint, "松开 UP 发送 · 说完再松手");
-    if (s_lbl_modal_sub) label_set_text(s_lbl_modal_sub, "最长 10 秒");
+    if (s_lbl_modal_hint) label_set_text(s_lbl_modal_hint, "松手直接说 · OK 发送 · DOWN 取消");
+    if (s_lbl_modal_sub) label_set_text(s_lbl_modal_sub, "说完自动发送 · 最长 10 秒");
     if (s_bar_modal) {
         lv_bar_set_range(s_bar_modal, 0, 10);
         lv_bar_set_value(s_bar_modal, remaining_sec > 10 ? 10 : remaining_sec,
@@ -2759,6 +3002,20 @@ void ecard_ui_show_ai_listen_modal(uint8_t remaining_sec, uint8_t audio_amplitud
 #else
     (void)remaining_sec;
     (void)audio_amplitude;
+#endif
+}
+
+uint8_t ecard_ui_modal_remaining_sec(void) {
+    return s_modal == ECARD_UI_MODAL_NONE ? 0 : s_modal_remaining_sec;
+}
+
+void ecard_ui_set_pomodoro_ai_paused(bool paused) {
+    if (s_pomo_ai_paused == paused) return;
+    s_pomo_ai_paused = paused;
+#if HAS_LVGL_RUNTIME
+    if (s_page == ECARD_UI_PAGE_POMODORO) {
+        update_pomodoro_content();
+    }
 #endif
 }
 
@@ -2856,6 +3113,7 @@ void ecard_ui_show_sos_pending(uint8_t seconds_left) {
     const bool needs_create = (s_modal != ECARD_UI_MODAL_SOS_PENDING) || !s_modal_container;
 #endif
     s_modal = ECARD_UI_MODAL_SOS_PENDING;
+    s_modal_remaining_sec = seconds_left;
 #if HAS_LVGL_RUNTIME
     if (needs_create) {
         create_sos_pending_modal();
@@ -2884,6 +3142,7 @@ void ecard_ui_show_sos_sent(void) {
 
 void ecard_ui_hide_modal(void) {
     s_modal = ECARD_UI_MODAL_NONE;
+    s_modal_remaining_sec = 0;
     s_has_playing_msg = false;
     memset(&s_playing_msg, 0, sizeof(s_playing_msg));
 #if HAS_LVGL_RUNTIME
@@ -2900,7 +3159,7 @@ ecard_ui_modal_t ecard_ui_get_modal(void) {
 
 static bool pomodoro_active_for_power(void) {
     if (s_page != ECARD_UI_PAGE_POMODORO) return false;
-    if (!ecard_pomodoro_is_running()) return false;
+    if (!ecard_pomodoro_is_running() && !s_pomo_ai_paused) return false;
     const ecard_pomodoro_phase_t phase = ecard_pomodoro_phase();
     return phase == ECARD_POMODORO_FOCUS ||
            phase == ECARD_POMODORO_BREAK ||

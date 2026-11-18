@@ -1,6 +1,8 @@
 #include "ecard_xiaozhi.h"
 #include "ecard_netlink.h"
 #include "ecard_opus_arena.h"
+#include "ecard_vad.h"
+#include "ecard_voice.h"
 #include <cJSON.h>
 #include <esp_app_desc.h>
 #include <esp_crt_bundle.h>
@@ -38,9 +40,13 @@
 #define TAG "ecard_xiaozhi"
 #define NVS_NAMESPACE "xiaozhi"
 #define RESPONSE_MAX 2048
+#define OTA_BODY_MAX 768
+#define OTA_TASK_STACK 8192
 #define WS_BUFFER_SIZE 1024
-#define WS_TASK_STACK 4096
+#define WS_TASK_STACK 6144
 #define TEXT_MAX 192
+
+static ecard_vad_t s_vad;
 
 static bool s_started;
 static bool s_ready;
@@ -69,7 +75,7 @@ static int64_t s_ws_tx_drop_log_us;
  * 否则 session_start() 会一直认为“会话已在进行中”，学生永远看到“连接中”。 */
 static volatile bool s_ws_dead;
 static volatile bool s_ws_stopping;
-static char s_pending_prompt[640];
+static char s_pending_prompt[128];
 static bool s_pending_prompt_valid;
 static char s_prompt_fallback[96];
 static bool s_prompt_fallback_valid;
@@ -91,7 +97,7 @@ static volatile uint32_t s_decoded_frames;
 static volatile int64_t s_last_rx_us;
 /* 最近一次提问与重播次数：服务端 RST 断流后自动重问一次，
  * 否则学生只会听到“两句话就没了”，必须手动再按一次卡。 */
-static char s_last_prompt[640];
+static char s_last_prompt[128];
 static char s_last_prompt_fallback[96];
 static uint8_t s_replay_count;
 /* 本轮回答结束后要自动追问的短句（单词卡例句）。任何新提问都会覆盖它。 */
@@ -101,10 +107,20 @@ static bool s_follow_valid;
 /* 控制消息发送队列：UI 线程只入队，绝不直接在 LVGL 锁内写 socket。
  * 之前 socket 半死时 send_text 会把按键线程卡住 10 秒，队列满后按键全丢。 */
 #define XZ_TX_ITEM_MAX 256
-#define XZ_TX_QUEUE_LEN 4
+#define XZ_TX_QUEUE_LEN 6
+
+typedef enum {
+    XZ_TX_OP_TEXT = 0,
+    XZ_TX_OP_ABORT_PLAYBACK,
+    XZ_TX_OP_LISTEN_START,
+    XZ_TX_OP_LISTEN_STOP,
+    XZ_TX_OP_LISTEN_CANCEL,
+} xz_tx_op_t;
 
 typedef struct {
+    uint8_t op;
     uint16_t len;
+    uint32_t seq;
     char data[XZ_TX_ITEM_MAX];
 } xz_tx_item_t;
 
@@ -120,6 +136,9 @@ typedef enum {
     XZ_AUDIO_ENCODE = 1,
 } xz_audio_mode_t;
 
+static volatile xz_audio_mode_t s_audio_mode = XZ_AUDIO_DECODE;
+static volatile xz_audio_mode_t s_audio_req_mode = XZ_AUDIO_DECODE;
+
 static bool ensure_audio_worker(void);
 static void release_audio_worker(void);
 static bool switch_audio_mode_timeout(xz_audio_mode_t target, uint32_t wait_ms);
@@ -129,6 +148,8 @@ static SemaphoreHandle_t s_state_lock;
 static volatile bool s_tx_stop;
 static volatile bool s_tx_done;
 static TickType_t s_prompt_retry_at;
+static volatile uint32_t s_listen_seq;
+static volatile bool s_abort_queued;
 /* 已发送 detect 或 listen:stop、正在等/播本轮服务端 TTS：
  * 切题 abort 时即使 tts:start 还没到也要发 abort，并丢弃未发出新请求前的迟到 tts:start。 */
 static volatile bool s_awaiting_tts;
@@ -345,7 +366,7 @@ static bool ws_send_text_now(const char *json) {
     return true;
 }
 
-static bool ws_send_text(const char *json) {
+static bool ws_send_ctrl(xz_tx_op_t op, uint32_t seq, const char *json) {
     if (!json) return false;
     const size_t len = strlen(json);
     if (len == 0 || len >= XZ_TX_ITEM_MAX) {
@@ -357,13 +378,19 @@ static bool ws_send_text(const char *json) {
         return ws_send_text_now(json);
     }
     xz_tx_item_t item;
+    item.op = (uint8_t)op;
     item.len = (uint16_t)len;
+    item.seq = seq;
     memcpy(item.data, json, len + 1);
     if (xQueueSend(s_tx_q, &item, 0) != pdTRUE) {
         ESP_LOGW(TAG, "控制消息队列已满，已丢弃");
         return false;
     }
     return true;
+}
+
+static bool ws_send_text(const char *json) {
+    return ws_send_ctrl(XZ_TX_OP_TEXT, 0, json);
 }
 
 static void log_ws_tx_drop(const char *reason, int err_code) {
@@ -606,46 +633,47 @@ static void xz_tx_task(void *arg) {
         if (s_tx_stop) break;
         if (xQueueReceive(s_tx_q, &s_tx_item, pdMS_TO_TICKS(50)) == pdTRUE) {
             if (s_tx_stop) break;
-            const bool is_listen_start =
-                strstr(s_tx_item.data, "\"state\":\"start\"") != NULL;
+            const xz_tx_op_t op = (xz_tx_op_t)s_tx_item.op;
+            const bool cur_seq = (s_tx_item.seq == s_listen_seq);
+            if (op == XZ_TX_OP_ABORT_PLAYBACK) {
+                s_abort_queued = false;
+            }
             if (s_ws && s_ws_connected) {
-                const bool is_listen_stop =
-                    strstr(s_tx_item.data, "\"state\":\"stop\"") != NULL;
-                const bool is_abort =
-                    strstr(s_tx_item.data, "\"type\":\"abort\"") != NULL;
-
-                // 队列里的手动追问 start 同样要先打断正在播放的回答。
-                char sid[64];
-                state_lock();
-                snprintf(sid, sizeof(sid), "%.63s", s_session_id);
-                state_unlock();
-                if (sid[0] && is_listen_start) {
-                    abort_tts_inline(sid);
-                }
                 // 先把残留麦克风帧编码发完并切回解码模式（释放编码器、重开解码器），
-                // 再向服务端发 listen:stop，避免服务端秒回 TTS 时解码器还没就绪。
-                if (is_listen_stop) {
+                // 再向服务端发 listen:stop / listen_cancel，避免服务端秒回 TTS 时解码器还没就绪。
+                // 注意：XZ_TX_OP_ABORT_PLAYBACK 是打断上一轮 TTS 播报，绝不能关闭刚打开的 Opus 编码器！
+                if (op == XZ_TX_OP_LISTEN_STOP && cur_seq) {
                     (void)switch_audio_mode_timeout(XZ_AUDIO_DECODE, 250);
                     s_awaiting_tts = true;
+                } else if (op == XZ_TX_OP_LISTEN_CANCEL && cur_seq) {
+                    (void)switch_audio_mode_timeout(XZ_AUDIO_DECODE, 250);
+                    s_awaiting_tts = false;
                 }
                 const int sent = esp_websocket_client_send_text(
                     s_ws, s_tx_item.data, s_tx_item.len, pdMS_TO_TICKS(1500));
-                if (is_listen_start) {
+                if (op == XZ_TX_OP_LISTEN_START && cur_seq) {
                     s_listen_pending = false;
                     s_listen_pending_until_us = 0;
                 }
                 if (sent <= 0) {
-                    if (is_listen_stop) s_awaiting_tts = false;
+                    if (op == XZ_TX_OP_LISTEN_STOP && cur_seq) {
+                        s_awaiting_tts = false;
+                    }
                     ESP_LOGW(TAG, "发送 JSON 失败（控制队列）");
+                } else if (op == XZ_TX_OP_ABORT_PLAYBACK ||
+                           op == XZ_TX_OP_LISTEN_CANCEL) {
+                    // 给服务端留出 ~60ms 先清理上一轮 TTS 管线，再接收紧随其后的 listen:start，
+                    // 防止服务端因旧 TTS 状态尚未收敛而丢弃新一轮上行语音。
+                    vTaskDelay(pdMS_TO_TICKS(60));
                 }
-                if (is_abort && sent > 0) {
-                    // 队列里紧跟 listen:start/detect 时只留短间隔，避免音频首帧积压。
-                    const UBaseType_t queued = s_tx_q ? uxQueueMessagesWaiting(s_tx_q) : 0;
-                    vTaskDelay(pdMS_TO_TICKS(queued > 0 ? 15 : 50));
+            } else {
+                if (op == XZ_TX_OP_LISTEN_START && cur_seq) {
+                    s_listen_pending = false;
+                    s_listen_pending_until_us = 0;
+                } else if ((op == XZ_TX_OP_LISTEN_STOP ||
+                            op == XZ_TX_OP_LISTEN_CANCEL) && cur_seq) {
+                    s_audio_req_mode = XZ_AUDIO_DECODE;
                 }
-            } else if (is_listen_start) {
-                s_listen_pending = false;
-                s_listen_pending_until_us = 0;
             }
         }
         if (s_tx_stop) break;
@@ -702,8 +730,6 @@ static QueueHandle_t s_enc_q;
 static TaskHandle_t s_audio_task;
 static volatile bool s_audio_stop;
 static volatile bool s_audio_done;
-static volatile xz_audio_mode_t s_audio_mode = XZ_AUDIO_DECODE;
-static volatile xz_audio_mode_t s_audio_req_mode = XZ_AUDIO_DECODE;
 static volatile bool s_audio_switch_ok;
 static SemaphoreHandle_t s_audio_ack_sem;
 static SemaphoreHandle_t s_audio_ctrl_lock;
@@ -842,9 +868,11 @@ static void pcm_ring_push_unlocked(int16_t sample) {
 
 static void pcm_ring_reset(void) {
     if (s_pcm_lock) xSemaphoreTake(s_pcm_lock, portMAX_DELAY);
-    s_pcm_head = 0;
-    s_pcm_tail = 0;
-    s_pcm_count = 0;
+    if (s_audio_mode == XZ_AUDIO_DECODE) {
+        s_pcm_head = 0;
+        s_pcm_tail = 0;
+        s_pcm_count = 0;
+    }
     if (s_pcm_lock) xSemaphoreGive(s_pcm_lock);
 }
 
@@ -937,13 +965,8 @@ static void tts_decode_frame(const uint8_t *data, size_t len, uint32_t gen) {
 
 static void encode_one_frame(const int16_t *frame, uint32_t *enc_frames) {
     if (!s_ws_connected || !s_opus_enc || !frame) return;
-    if (s_listen_pending) {
-        const int64_t deadline = s_listen_pending_until_us;
-        if (deadline != 0 && esp_timer_get_time() < deadline) {
-            return;
-        }
-        s_listen_pending = false;
-        s_listen_pending_until_us = 0;
+    if (s_listen_pending && s_vad.total_ms <= ECARD_VAD_SETTLE_MS) {
+        return;
     }
     uint8_t *const out_buf = s_dec_pcm + XZ_MIC_FRAME_SAMPLES * sizeof(int16_t);
     esp_audio_enc_in_frame_t in = {
@@ -1057,6 +1080,25 @@ static void xz_audio_task(void *arg) {
                 }
             }
         } else {
+            if (s_listen_pending) {
+                const int64_t deadline = s_listen_pending_until_us;
+                if (deadline == 0 || esp_timer_get_time() >= deadline) {
+                    s_listen_pending = false;
+                    s_listen_pending_until_us = 0;
+                } else if (s_vad.total_ms <= ECARD_VAD_SETTLE_MS) {
+                    // 前 120ms 扬声器尾音静默期内直接丢弃残响帧，防止把小智自己的尾音录进去。
+                    if (s_enc_q) {
+                        (void)xQueueReceive(s_enc_q, enc_in_frame, pdMS_TO_TICKS(15));
+                    } else {
+                        vTaskDelay(pdMS_TO_TICKS(15));
+                    }
+                    continue;
+                } else {
+                    // 超过 120ms 但 listen:start 仍在队列发送中：暂缓出队，把学生的起首字保留在队列中。
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                    continue;
+                }
+            }
             if (s_enc_q &&
                 xQueueReceive(s_enc_q, enc_in_frame, pdMS_TO_TICKS(20)) == pdTRUE) {
                 if (s_audio_stop) continue;
@@ -1090,6 +1132,7 @@ void ecard_xiaozhi_feed_mic_pcm(const int16_t *pcm, size_t samples) {
         return;
     }
     xSemaphoreTake(s_pcm_lock, portMAX_DELAY);
+    ecard_vad_feed(&s_vad, pcm, samples, ECARD_VOICE_SAMPLE_RATE);
     QueueHandle_t q = (s_audio_mode == XZ_AUDIO_ENCODE) ? s_enc_q : NULL;
     if (q) {
         int16_t *const enc_frame = s_pcm_ring;
@@ -1111,14 +1154,32 @@ void ecard_xiaozhi_feed_mic_pcm(const int16_t *pcm, size_t samples) {
 void ecard_xiaozhi_reset_mic(void) {
     if (!s_pcm_lock) {
         s_enc_fill = 0;
+        ecard_vad_reset(&s_vad);
         return;
     }
     xSemaphoreTake(s_pcm_lock, portMAX_DELAY);
     s_enc_fill = 0;
+    ecard_vad_reset(&s_vad);
     if (s_audio_mode == XZ_AUDIO_ENCODE && s_enc_q) {
         (void)xQueueReset(s_enc_q);
     }
     xSemaphoreGive(s_pcm_lock);
+}
+
+bool ecard_xiaozhi_mic_active(void) {
+    return s_vad.total_ms > 0;
+}
+
+uint8_t ecard_xiaozhi_mic_amplitude(void) {
+    return s_vad.amplitude;
+}
+
+bool ecard_xiaozhi_mic_voice_detected(void) {
+    return s_vad.voice_detected;
+}
+
+bool ecard_xiaozhi_mic_vad_complete(void) {
+    return s_vad.end_of_speech;
 }
 
 bool ecard_xiaozhi_is_speaking(void) {
@@ -1147,14 +1208,17 @@ void ecard_xiaozhi_reset_playback(void) {
     snprintf(sid, sizeof(sid), "%.63s", s_session_id);
     state_unlock();
 
-    if (!need_abort || !sid[0]) return;
+    if (!need_abort || !sid[0] || s_abort_queued) return;
 
     // 只清本地缓冲还不够：服务端仍会继续推完这一轮回答，下一题提交时
-    // 新旧两段 TTS 会叠在一起。这里把 abort 放进发送队列，由 xz_tx 在
-    // 下一条 listen/detect 之前发出，既立即停声又不阻塞按键线程。
+    // 新旧两段 TTS 会叠在一起。这里用显式 XZ_TX_OP_ABORT_PLAYBACK 入队，由 xz_tx 在
+    // 下一条 listen/detect 之前发出，既立即停声、不阻塞按键线程，也绝不会误关 Opus 编码器。
     char json[128];
     snprintf(json, sizeof(json), "{\"session_id\":\"%.40s\",\"type\":\"abort\"}", sid);
-    ws_send_text(json);
+    s_abort_queued = true;
+    if (!ws_send_ctrl(XZ_TX_OP_ABORT_PLAYBACK, 0, json) || !s_tx_q) {
+        s_abort_queued = false;
+    }
     ESP_LOGI(TAG, "已请求中止上一轮回答");
 }
 
@@ -1255,7 +1319,9 @@ static void handle_json(const char *json, size_t len) {
                 ESP_LOGI(TAG, "TTS: %s", s_last_tts_state);
             }
             if (strcmp(state->valuestring, "start") == 0) {
-                if (!s_awaiting_tts || s_pending_prompt_valid) {
+                if (!s_awaiting_tts || s_pending_prompt_valid ||
+                    s_audio_mode != XZ_AUDIO_DECODE ||
+                    s_audio_req_mode != XZ_AUDIO_DECODE) {
                     ESP_LOGW(TAG, "丢弃已作废轮次的迟到 tts:start");
                 } else {
                     s_prompt_fallback_valid = false;
@@ -1386,14 +1452,15 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
                 }
             }
         }
-        // 握手完成后再打开解码器、音频任务与发送任务，避免把 mbedTLS MPI 握手内存挤爆（-0x4290）。
-        (void)ensure_decoder();
+        // 握手完成后只启动后台音频/发送任务，Opus 解码器延迟到 28 KB 静态栈的 xz_audio_task 首次解码时打开，
+        // 避免在 WebSocket 事件任务栈上执行解码器初始化与注册导致首连栈峰值过高。
         (void)ensure_audio_worker();
         if (!ensure_tx_worker()) {
             ESP_LOGW(TAG, "发送任务创建失败，控制消息将走同步发送");
         }
-        ESP_LOGI(TAG, "WebSocket 已连接（握手后堆剩余 %u）",
-                 (unsigned)esp_get_free_heap_size());
+        ESP_LOGI(TAG, "WebSocket 已连接（握手后堆剩余 %u，任务栈余量 %u 字节）",
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
         send_hello();
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
@@ -1629,16 +1696,18 @@ static void ws_start(void) {
 
 static void ota_task(void *arg) {
     (void)arg;
-    char body[768];
+    char *body = malloc(OTA_BODY_MAX);
     char *response = malloc(RESPONSE_MAX);
-    if (!response) {
-        ESP_LOGE(TAG, "无法分配 OTA 响应缓冲");
+    if (!body || !response) {
+        free(body);
+        free(response);
+        ESP_LOGE(TAG, "无法分配 OTA 缓冲");
         s_connect_failed = true;
         s_ota_running = false;
         vTaskDelete(NULL);
         return;
     }
-    build_body(body, sizeof(body));
+    build_body(body, OTA_BODY_MAX);
 
     for (int attempt = 0; attempt < 3 && !s_ota_abort; ++attempt) {
         const int status = http_post(body, response, RESPONSE_MAX);
@@ -1663,6 +1732,7 @@ static void ota_task(void *arg) {
             vTaskDelay(pdMS_TO_TICKS(200));
         }
     }
+    free(body);
     free(response);
     const bool start_ws = (s_ready && !s_ota_abort);
     if (!s_ready && !s_ota_abort) {
@@ -1672,6 +1742,8 @@ static void ota_task(void *arg) {
     if (start_ws) {
         ws_start();
     }
+    ESP_LOGI(TAG, "OTA 任务结束（栈最低余量 %u 字节）",
+             (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
     vTaskDelete(NULL);
 }
 
@@ -1714,7 +1786,7 @@ void ecard_xiaozhi_session_start(void) {
         return;
     }
     s_ota_running = true;
-    if (xTaskCreate(ota_task, "xiaozhi_ota", 3584, NULL, 3, NULL) != pdPASS) {
+    if (xTaskCreate(ota_task, "xiaozhi_ota", OTA_TASK_STACK, NULL, 3, NULL) != pdPASS) {
         s_ota_running = false;
         s_connect_failed = true;
         ESP_LOGE(TAG, "OTA 任务创建失败");
@@ -1724,10 +1796,14 @@ void ecard_xiaozhi_session_start(void) {
 void ecard_xiaozhi_session_stop(void) {
     s_ws_stopping = true;
     s_ota_abort = true;
+    for (int i = 0; i < 100 && s_ota_running; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
     s_retried_ota_this_session = false;
     s_ws_connected = false;
     s_listen_pending = false;
     s_listen_pending_until_us = 0;
+    s_abort_queued = false;
     s_ws_tx_drop_count = 0;
     s_ws_tx_drop_log_us = 0;
     s_tx_stop = true;
@@ -1738,7 +1814,14 @@ void ecard_xiaozhi_session_stop(void) {
         // 任务自己在退出前已经 vTaskDelete，句柄只用于状态判断。
         s_tx_task = NULL;
     }
-    if (s_tx_q) (void)xQueueReset(s_tx_q);
+    if (s_tx_q) {
+        if (!s_tx_task) {
+            vQueueDelete(s_tx_q);
+            s_tx_q = NULL;
+        } else {
+            (void)xQueueReset(s_tx_q);
+        }
+    }
     // 先停掉音频任务再关编解码器，避免它拿着已释放的句柄。
     release_audio_worker();
     if (s_ws) {
@@ -1943,12 +2026,35 @@ bool ecard_xiaozhi_listen_start(void) {
     state_unlock();
     if (!sid[0]) return false;
 
-    // 开始录音前：中止上一轮回答，并让 28 KB 静态音频任务原地切到 Opus 编码模式。
-    // 在 xz_tx_task 真正发出 listen:start 之前先暂扣二进制语音帧（最多 450 ms 兜底放行），
-    // 避免首帧早于 listen:start 到达服务端，也防止 TX 拥堵时整段录音被扣成空帧。
-    abort_tts_inline(sid);
+    // 开始录音前：若上一轮 TTS 仍在播报或等待中，通过控制队列先发 XZ_TX_OP_ABORT_PLAYBACK
+    //（绝不在按键/LVGL 锁线程内直接写 WebSocket），再让 28 KB 静态音频任务原地切到 Opus 编码模式。
+    const bool need_abort = s_tts_active || s_pcm_count > 0 || s_awaiting_tts;
+    s_tts_active = false;
+    s_awaiting_tts = false;
+    ++s_tts_gen;
+    if (s_opus_q) (void)xQueueReset(s_opus_q);
+    pcm_ring_reset();
+    if (need_abort && !s_abort_queued) {
+        char abort_json[128];
+        snprintf(abort_json, sizeof(abort_json),
+                 "{\"session_id\":\"%.40s\",\"type\":\"abort\"}", sid);
+        s_abort_queued = true;
+        if (!ws_send_ctrl(XZ_TX_OP_ABORT_PLAYBACK, 0, abort_json) || !s_tx_q) {
+            s_abort_queued = false;
+        }
+    }
+
+    const uint32_t seq = ++s_listen_seq;
+    s_last_stt[0] = '\0';
+    s_last_llm[0] = '\0';
+    s_tts_audio_bytes = 0;
+    s_enc_sent = 0;
+    s_ws_tx_drop_count = 0;
+    s_ws_tx_drop_log_us = 0;
+    ecard_vad_reset(&s_vad);
+
     s_listen_pending = (s_tx_q != NULL);
-    s_listen_pending_until_us = s_listen_pending ? (esp_timer_get_time() + 450000LL) : 0;
+    s_listen_pending_until_us = s_listen_pending ? (esp_timer_get_time() + 650000LL) : 0;
     if (!switch_audio_mode(XZ_AUDIO_ENCODE)) {
         s_listen_pending = false;
         s_listen_pending_until_us = 0;
@@ -1963,17 +2069,11 @@ bool ecard_xiaozhi_listen_start(void) {
              "{\"session_id\":\"%s\",\"type\":\"listen\",\"state\":\"start\","
              "\"mode\":\"manual\"}",
              sid);
-    s_last_stt[0] = '\0';
-    s_last_llm[0] = '\0';
-    s_tts_audio_bytes = 0;
-    s_enc_sent = 0;
-    s_ws_tx_drop_count = 0;
-    s_ws_tx_drop_log_us = 0;
-    if (!ws_send_text(json) || !s_tx_q) {
+    if (!ws_send_ctrl(XZ_TX_OP_LISTEN_START, seq, json) || !s_tx_q) {
         s_listen_pending = false;
         s_listen_pending_until_us = 0;
     }
-    ESP_LOGI(TAG, "listen start（手动模式）");
+    ESP_LOGI(TAG, "listen start（免持手动模式，seq=%u）", (unsigned)seq);
     return true;
 }
 
@@ -1982,19 +2082,55 @@ bool ecard_xiaozhi_listen_had_audio(void) {
 }
 
 void ecard_xiaozhi_listen_stop(void) {
-    if (!s_ws_connected) return;
+    const uint32_t seq = s_listen_seq;
+    if (!s_ws_connected) {
+        s_audio_req_mode = XZ_AUDIO_DECODE;
+        return;
+    }
     char sid[64];
     state_lock();
     snprintf(sid, sizeof(sid), "%s", s_session_id);
     state_unlock();
-    if (!sid[0]) return;
+    if (!sid[0]) {
+        s_audio_req_mode = XZ_AUDIO_DECODE;
+        return;
+    }
     char json[224];
     snprintf(json, sizeof(json),
              "{\"session_id\":\"%s\",\"type\":\"listen\",\"state\":\"stop\"}",
              sid);
-    ws_send_text(json);
+    if (!ws_send_ctrl(XZ_TX_OP_LISTEN_STOP, seq, json) || !s_tx_q) {
+        s_audio_req_mode = XZ_AUDIO_DECODE;
+    }
     // 编码任务的释放交给 xz_tx：它要等任务退出，不能卡住 LVGL 线程。
-    ESP_LOGI(TAG, "listen stop");
+    ESP_LOGI(TAG, "listen stop（seq=%u）", (unsigned)seq);
+}
+
+void ecard_xiaozhi_listen_cancel(void) {
+    const uint32_t seq = ++s_listen_seq;
+    s_listen_pending = false;
+    s_listen_pending_until_us = 0;
+    ecard_xiaozhi_reset_mic();
+    s_awaiting_tts = false;
+    if (!s_ws_connected) {
+        s_audio_req_mode = XZ_AUDIO_DECODE;
+        return;
+    }
+    char sid[64];
+    state_lock();
+    snprintf(sid, sizeof(sid), "%s", s_session_id);
+    state_unlock();
+    if (!sid[0]) {
+        s_audio_req_mode = XZ_AUDIO_DECODE;
+        return;
+    }
+    char json[160];
+    snprintf(json, sizeof(json),
+             "{\"session_id\":\"%.40s\",\"type\":\"abort\"}", sid);
+    if (!ws_send_ctrl(XZ_TX_OP_LISTEN_CANCEL, seq, json) || !s_tx_q) {
+        s_audio_req_mode = XZ_AUDIO_DECODE;
+    }
+    ESP_LOGI(TAG, "listen cancel（无有效人声或主动取消，seq=%u）", (unsigned)seq);
 }
 
 void ecard_xiaozhi_send_audio(const uint8_t *opus, size_t len) {

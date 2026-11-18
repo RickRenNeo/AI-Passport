@@ -206,6 +206,50 @@ class RelayServerTests(unittest.TestCase):
         finally:
             udp.stop()
 
+    def test_curriculum_parent_config_and_poll(self) -> None:
+        dev_id = "11:22:33:44:55:66"
+        c, raw = self._req("POST", "/api/v1/device/poll", {
+            "device_id": dev_id,
+            "role": "student",
+            "class_name": "四年级(1)班",
+        })
+        self.assertEqual(c, 200)
+
+        # Parent configures current_grade=4 with auto ±1 window -> [3, 4, 5]
+        c, raw = self._req("POST", "/api/v1/client/curriculum", {
+            "device_id": dev_id,
+            "current_grade": 4,
+            "grades": [],
+        })
+        self.assertEqual(c, 200)
+        cur = json.loads(raw)["curriculum"]
+        self.assertEqual(cur["current_grade"], 4)
+        self.assertEqual(cur["grades"], [3, 4, 5])
+
+        # Reject >3 grades
+        c, _ = self._req("POST", "/api/v1/client/curriculum", {
+            "device_id": dev_id,
+            "current_grade": 3,
+            "grades": [1, 2, 3, 4],
+        })
+        self.assertEqual(c, 400)
+
+        # Custom 2 grades [5, 6] delivered in next device/poll
+        self.now[0] += 5
+        c, _ = self._req("POST", "/api/v1/client/curriculum", {
+            "device_id": dev_id,
+            "current_grade": 6,
+            "grades": [6, 5],
+        })
+        self.assertEqual(c, 200)
+
+        c, raw = self._req("POST", "/api/v1/device/poll", {"device_id": dev_id})
+        self.assertEqual(c, 200)
+        poll_cur = json.loads(raw)["curriculum"]
+        self.assertEqual(poll_cur["current_grade"], 6)
+        self.assertEqual(poll_cur["grades"], [5, 6])
+        self.assertGreater(poll_cur["updated_epoch"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

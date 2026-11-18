@@ -38,6 +38,7 @@ def check_coverage(size: int, required: set[str]) -> None:
     symbol = re.search(rf"const lv_font_t (ecard_font_{size})\b", text)
     require(symbol is not None, f"ecard_font_{size}.c does not define the expected LVGL 9 symbol")
     require(".fallback = NULL" in text, f"ecard_font_{size}.c has no fallback field")
+    require(".bitmap_format = 1" in text, f"ecard_font_{size}.c must use LVGL RLE compression (.bitmap_format = 1)")
 
     missing = sorted(ch for ch in required if ord(ch) not in actual)
     if missing:
@@ -68,6 +69,7 @@ def check_build_integration() -> None:
     config = SDKCONFIG.read_text(encoding="utf-8")
     for setting in (
         "CONFIG_LV_TXT_ENC_UTF8=y",
+        "CONFIG_LV_USE_FONT_COMPRESSED=y",
         "CONFIG_LV_USE_FONT_PLACEHOLDER=y",
         "CONFIG_LV_FONT_FMT_TXT_LARGE=y",
     ):

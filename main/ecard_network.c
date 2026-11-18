@@ -16,6 +16,7 @@
 #include <freertos/task.h>
 #include <lwip/sockets.h>
 
+#include "ecard_cards.h"
 #include "ecard_netlink.h"
 #include "ecard_setup.h"
 #include "ecard_time.h"
@@ -45,6 +46,7 @@ static volatile bool s_sync_dirty = false;
 static volatile bool s_sync_requested = false;
 static volatile bool s_relay_online = false;
 static volatile bool s_sos_pending = false;
+static int64_t s_last_curriculum_epoch = 0;
 static char s_sos_student_id[24];
 static char s_sos_location[64];
 static char s_discovered_relay_url[128];
@@ -508,6 +510,37 @@ static void update_acl_from_json(const cJSON *acl_obj, const ecard_setup_t *cfg)
     ecard_network_set_acl(&acl);
 }
 
+static void update_curriculum_from_json(const cJSON *cur_obj) {
+    if (!cJSON_IsObject(cur_obj)) return;
+    const cJSON *j_ep = cJSON_GetObjectItem(cur_obj, "updated_epoch");
+    const int64_t updated_epoch = cJSON_IsNumber(j_ep) ? (int64_t)j_ep->valuedouble : 0;
+    if (updated_epoch <= 0 || updated_epoch == s_last_curriculum_epoch) return;
+
+    const cJSON *j_cg = cJSON_GetObjectItem(cur_obj, "current_grade");
+    if (!cJSON_IsNumber(j_cg) || j_cg->valueint < 1 || j_cg->valueint > 6) return;
+    const uint8_t current_grade = (uint8_t)j_cg->valueint;
+
+    uint8_t grades[ECARD_MAX_ACTIVE_GRADES] = {0};
+    uint8_t gcount = 0;
+    const cJSON *j_grades = cJSON_GetObjectItem(cur_obj, "grades");
+    if (cJSON_IsArray(j_grades)) {
+        const cJSON *it = NULL;
+        cJSON_ArrayForEach(it, j_grades) {
+            if (!cJSON_IsNumber(it) || it->valueint < 1 || it->valueint > 6) continue;
+            if (gcount < ECARD_MAX_ACTIVE_GRADES) {
+                grades[gcount++] = (uint8_t)it->valueint;
+            }
+        }
+    }
+
+    if (ecard_setup_save_curriculum(current_grade, gcount > 0 ? grades : NULL, gcount)) {
+        s_last_curriculum_epoch = updated_epoch;
+        s_sync_dirty = true;
+        ESP_LOGI(TAG, "已同步家长端题库配置: 当前 %u 年级, 保留 %u 个年级",
+                 (unsigned)current_grade, (unsigned)ecard_cards_active_grades(NULL));
+    }
+}
+
 static bool process_pending_uploads(const char *relay_url, const char *dev_id, const ecard_setup_t *cfg) {
     if (!s_sos_pending && ecard_xiaozhi_is_busy()) return true;
     ecard_message_t msg;
@@ -670,6 +703,7 @@ static void process_poll_and_ack(const char *relay_url, const char *dev_id, cons
     s_relay_online = true;
     sync_time_from_json(root);
     update_acl_from_json(cJSON_GetObjectItem(root, "acl"), cfg);
+    update_curriculum_from_json(cJSON_GetObjectItem(root, "curriculum"));
 
     cJSON *ack_ids = cJSON_CreateArray();
     const cJSON *msgs = cJSON_GetObjectItem(root, "messages");

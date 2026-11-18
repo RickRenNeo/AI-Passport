@@ -167,6 +167,38 @@ static void test_arena_borrow_and_mutex_with_codec(void) {
     assert(!ecard_opus_arena_busy());
 }
 
+static void test_arena_owns_and_portal_fallback_safety(void) {
+    assert(!ecard_opus_arena_owns(NULL));
+
+    // 模拟 esp_opus_dec_open：先 8 字节句柄走系统堆，再 17864 字节解码状态进后备区
+    ecard_opus_arena_begin();
+    void *dec_wrap = media_lib_module_calloc("OPUS_DEC", 1, 8);
+    void *dec_state = media_lib_module_malloc("OPUS_DEC", 17864);
+    ecard_opus_arena_end();
+    assert(dec_wrap != NULL && !ecard_opus_arena_owns(dec_wrap));
+    assert(dec_state != NULL && ecard_opus_arena_owns(dec_state));
+    assert(ecard_opus_arena_busy());
+
+    // 后备区忙碌时配网门户回退 malloc，归还非后备区指针不得破坏正在工作的解码器
+    void *heap_html = calloc(1, 4096);
+    assert(heap_html != NULL && !ecard_opus_arena_owns(heap_html));
+    ecard_opus_arena_return(heap_html);
+    assert(ecard_opus_arena_busy());
+    free(heap_html);
+
+    media_lib_free(dec_state);
+    media_lib_free(dec_wrap);
+    assert(!ecard_opus_arena_busy());
+
+    // 解码器关闭后，配网门户可直接零堆开销借用后备区存放 4 KB HTML 页面
+    uint8_t *arena_html = NULL;
+    size_t cap = 0;
+    assert(ecard_opus_arena_borrow(&arena_html, &cap));
+    assert(cap >= 4096u && ecard_opus_arena_owns(arena_html));
+    ecard_opus_arena_return(arena_html);
+    assert(!ecard_opus_arena_busy());
+}
+
 int main(void) {
     printf("Running ecard_opus_arena tests...\n");
     test_arena_capacity_and_idle();
@@ -175,6 +207,7 @@ int main(void) {
     test_arena_calloc();
     test_arena_decoder_encoder_alternation();
     test_arena_borrow_and_mutex_with_codec();
+    test_arena_owns_and_portal_fallback_safety();
     printf("ecard_opus_arena tests passed!\n");
     return 0;
 }

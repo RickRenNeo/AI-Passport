@@ -148,6 +148,8 @@ static esp_err_t api_handler(httpd_req_t *req) {
             ecard_ui_pomodoro_refresh();
         } else if (page == ECARD_UI_PAGE_PAIR) {
             ecard_ui_pair_refresh();
+        } else if (page == ECARD_UI_PAGE_POEM_PICK || page == ECARD_UI_PAGE_WORD_PICK) {
+            ecard_ui_show_page(page);
         } else if (page == ECARD_UI_PAGE_DEVICE) {
             ecard_ui_refresh_content();
         }

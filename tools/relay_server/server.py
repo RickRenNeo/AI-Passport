@@ -58,6 +58,7 @@ class RelayState:
         self._clock = clock
         self.devices: dict[str, dict] = {}
         self.acls: dict[str, dict] = {}
+        self.curriculums: dict[str, dict] = {}
         # Ephemeral outbound-to-device messages: device_id -> {remote_id: msg_dict}
         self.to_device: dict[str, dict[str, dict]] = {}
         # Ephemeral inbound-to-client messages (from device): remote_id -> msg_dict
@@ -151,11 +152,78 @@ class RelayState:
                     "audio_format": m["audio_format"],
                     "created_epoch": m["created_epoch"],
                 })
-            return {
+            resp = {
                 "ok": True,
                 "server_time": now_ep,
                 "acl": acl,
                 "messages": messages,
+            }
+            if dev_id in self.curriculums:
+                resp["curriculum"] = dict(self.curriculums[dev_id])
+            return resp
+
+    @staticmethod
+    def default_grade_window(current_grade: int) -> list[int]:
+        g = max(1, min(6, int(current_grade)))
+        if g <= 2:
+            return [1, 2, 3]
+        if g >= 5:
+            return [4, 5, 6]
+        return [g - 1, g, g + 1]
+
+    def set_curriculum(self, device_id: str, payload: dict) -> tuple[int, dict]:
+        with self._lock:
+            try:
+                cg = int(payload.get("current_grade") or 0)
+            except (TypeError, ValueError):
+                return 400, {"ok": False, "error": "invalid_current_grade"}
+            if cg < 1 or cg > 6:
+                return 400, {"ok": False, "error": "invalid_current_grade"}
+
+            raw_grades = payload.get("grades")
+            if raw_grades is None or raw_grades == []:
+                grades = self.default_grade_window(cg)
+            else:
+                if not isinstance(raw_grades, list) or len(raw_grades) > 3:
+                    return 400, {"ok": False, "error": "max_3_grades_allowed"}
+                cleaned: list[int] = []
+                for item in raw_grades:
+                    try:
+                        gv = int(item)
+                    except (TypeError, ValueError):
+                        return 400, {"ok": False, "error": "invalid_grade"}
+                    if gv < 1 or gv > 6:
+                        return 400, {"ok": False, "error": "invalid_grade"}
+                    if gv not in cleaned:
+                        cleaned.append(gv)
+                if not cleaned or len(cleaned) > 3:
+                    return 400, {"ok": False, "error": "invalid_grades"}
+                grades = sorted(cleaned)
+
+            entry = {
+                "current_grade": cg,
+                "grades": grades,
+                "max_grades": 3,
+                "updated_epoch": max(1, self.now()),
+            }
+            self.curriculums[device_id] = entry
+            self._log("CURRICULUM_UPDATED", f"Device {device_id}: grade={cg}, retained={grades}")
+            return 200, {"ok": True, "device_id": device_id, "curriculum": dict(entry)}
+
+    def get_curriculum(self, device_id: str) -> dict:
+        with self._lock:
+            cur = self.curriculums.get(device_id)
+            if cur:
+                return {"ok": True, "device_id": device_id, "curriculum": dict(cur)}
+            return {
+                "ok": True,
+                "device_id": device_id,
+                "curriculum": {
+                    "current_grade": 3,
+                    "grades": [2, 3, 4],
+                    "max_grades": 3,
+                    "updated_epoch": 0,
+                },
             }
 
     def get_device_audio(self, remote_id: str, device_id: str | None = None) -> bytes | None:
@@ -496,6 +564,7 @@ class RelayState:
                 "zero_retention_mode": True,
                 "devices": list(self.devices.values()),
                 "acls": self.acls,
+                "curriculums": self.curriculums,
                 "ephemeral_queues": {
                     "to_device_count": to_dev_count,
                     "to_device_bytes": to_dev_bytes,
@@ -568,6 +637,11 @@ def make_handler(state: RelayState):
                 self._send_json(HTTPStatus.OK, state.client_state())
                 return
 
+            if path == "/api/v1/client/curriculum":
+                dev_id = state.resolve_device_id(qs.get("device_id")) or "default"
+                self._send_json(HTTPStatus.OK, state.get_curriculum(dev_id))
+                return
+
             if path.startswith("/api/v1/device/audio/"):
                 rid = path.removeprefix("/api/v1/device/audio/").strip("/")
                 audio = state.get_device_audio(rid, qs.get("device_id"))
@@ -622,6 +696,12 @@ def make_handler(state: RelayState):
                 if path == "/api/v1/client/acl":
                     dev_id = state.resolve_device_id(payload.get("device_id")) or "default"
                     self._send_json(HTTPStatus.OK, state.set_acl(dev_id, payload.get("acl", payload)))
+                    return
+
+                if path == "/api/v1/client/curriculum":
+                    dev_id = state.resolve_device_id(payload.get("device_id")) or "default"
+                    code, res = state.set_curriculum(dev_id, payload)
+                    self._send_json(code, res)
                     return
 
                 if path == "/api/v1/client/send":

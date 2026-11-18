@@ -113,7 +113,34 @@
     <textarea id="aclAdmins" rows="2">[{"id":"A001","name":"陈主任","phone":"13900002222","school":"第一实验小学"}]</textarea>
   </section>
 
-  <!-- 3. 零留存状态 & 学生端上传收件箱 -->
+  <!-- 3. 题库年级配置（家长端） -->
+  <section class="card">
+    <h2>古诗/英语题库配置 <button class="sec" onclick="saveCurriculum()">下发保存</button></h2>
+    <label>学生当前年级（默认保留本年级及前后各一年）</label>
+    <div class="row" style="margin-top:4px">
+      <select id="curGrade" onchange="applyDefaultGradeWindow(this.value)" style="flex:1">
+        <option value="1">一年级</option>
+        <option value="2">二年级</option>
+        <option value="3" selected>三年级</option>
+        <option value="4">四年级</option>
+        <option value="5">五年级</option>
+        <option value="6">六年级</option>
+      </select>
+      <button type="button" class="sec" onclick="applyDefaultGradeWindow(curGrade.value)">按前后一年默认</button>
+    </div>
+    <label>设备端保留年级（最多勾选 3 个年级，全量必背古诗古文 + 按单元英语单词）</label>
+    <div class="row" id="curGradesBox" style="margin-top:6px;gap:10px">
+      <label style="display:inline-flex;align-items:center;gap:4px;margin:0;color:var(--ink)"><input type="checkbox" value="1" onchange="limitGradeChecks(this)" style="width:auto"> 一年级</label>
+      <label style="display:inline-flex;align-items:center;gap:4px;margin:0;color:var(--ink)"><input type="checkbox" value="2" checked onchange="limitGradeChecks(this)" style="width:auto"> 二年级</label>
+      <label style="display:inline-flex;align-items:center;gap:4px;margin:0;color:var(--ink)"><input type="checkbox" value="3" checked onchange="limitGradeChecks(this)" style="width:auto"> 三年级</label>
+      <label style="display:inline-flex;align-items:center;gap:4px;margin:0;color:var(--ink)"><input type="checkbox" value="4" checked onchange="limitGradeChecks(this)" style="width:auto"> 四年级</label>
+      <label style="display:inline-flex;align-items:center;gap:4px;margin:0;color:var(--ink)"><input type="checkbox" value="5" onchange="limitGradeChecks(this)" style="width:auto"> 五年级</label>
+      <label style="display:inline-flex;align-items:center;gap:4px;margin:0;color:var(--ink)"><input type="checkbox" value="6" onchange="limitGradeChecks(this)" style="width:auto"> 六年级</label>
+    </div>
+    <div id="curStatus" style="font-size:12px;color:var(--muted);margin-top:8px">默认保留：二 / 三 / 四年级（当前：三年级）</div>
+  </section>
+
+  <!-- 4. 零留存状态 & 学生端上传收件箱 -->
   <section class="card">
     <h2>服务器零留存监控 &amp; 学生录音收件箱</h2>
     <div class="metrics">
@@ -127,7 +154,7 @@
     <div id="sosList"><div class="item">暂无 SOS 告警</div></div>
   </section>
 
-  <!-- 4. 在线设备 & 审计日志 -->
+  <!-- 5. 在线设备 & 审计日志 -->
   <section class="card" style="grid-column: 1 / -1;">
     <h2>在线设备与中转审计日志（实时）</h2>
     <div id="devicesBox" style="margin-bottom:10px"></div>
@@ -138,6 +165,49 @@
 <script>
 let recordedWavB64 = null;
 let mediaStream = null, audioCtx = null, procNode = null, pcmChunks = [];
+
+function defaultGradeWindow(g) {
+  const n = Number(g) || 3;
+  if (n <= 2) return [1, 2, 3];
+  if (n >= 5) return [4, 5, 6];
+  return [n - 1, n, n + 1];
+}
+
+function applyDefaultGradeWindow(g) {
+  const win = defaultGradeWindow(g);
+  document.querySelectorAll('#curGradesBox input[type=checkbox]').forEach(cb => {
+    cb.checked = win.includes(Number(cb.value));
+  });
+}
+
+function limitGradeChecks(changed) {
+  const checked = [...document.querySelectorAll('#curGradesBox input[type=checkbox]:checked')];
+  if (checked.length > 3) {
+    changed.checked = false;
+    curStatus.style.color = '#dc2626';
+    curStatus.textContent = '设备端最多保留 3 个年级的题库';
+  }
+}
+
+async function saveCurriculum() {
+  const devId = targetDevice.value.trim() || 'auto';
+  const currentGrade = Number(curGrade.value) || 3;
+  const grades = [...document.querySelectorAll('#curGradesBox input[type=checkbox]:checked')].map(x => Number(x.value));
+  const r = await fetch('/api/v1/client/curriculum', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({device_id: devId, current_grade: currentGrade, grades})
+  });
+  const d = await r.json();
+  if (r.ok && d.ok) {
+    const c = d.curriculum;
+    curStatus.style.color = '#059669';
+    curStatus.textContent = `题库配置已更新 (${d.device_id})：当前 ${c.current_grade} 年级，保留 [${c.grades.join(', ')}] 年级，设备下次轮询生效`;
+  } else {
+    curStatus.style.color = '#dc2626';
+    curStatus.textContent = `保存失败: ${d.error || r.status}`;
+  }
+}
 
 function fillPreset(kind) {
   const school = document.getElementById('aclSchool').value.trim();

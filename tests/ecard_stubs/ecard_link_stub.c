@@ -3,6 +3,8 @@
 #include "ecard_lan_http.h"
 #include "ecard_portal.h"
 #include "ecard_time.h"
+#include "ecard_vad.h"
+#include "ecard_voice.h"
 #include "ecard_xiaozhi.h"
 #include <stdio.h>
 
@@ -12,6 +14,11 @@ bool ecard_stub_ai_connect_failed = false;
 bool ecard_stub_lan_ai_busy = false;
 unsigned ecard_stub_ai_session_start_calls = 0;
 unsigned ecard_stub_ai_session_stop_calls = 0;
+unsigned ecard_stub_listen_start_calls = 0;
+unsigned ecard_stub_listen_stop_calls = 0;
+unsigned ecard_stub_listen_cancel_calls = 0;
+
+static ecard_vad_t s_stub_vad;
 
 bool ecard_lan_http_start(void) { return true; }
 void ecard_lan_http_stop(void) {}
@@ -62,16 +69,33 @@ void ecard_xiaozhi_ask_with_follow(const char *text, const char *follow) {
     (void)text;
     (void)follow;
 }
-bool ecard_xiaozhi_listen_start(void) { return true; }
-bool ecard_xiaozhi_listen_had_audio(void) { return true; }
-void ecard_xiaozhi_listen_stop(void) {}
-void ecard_xiaozhi_feed_mic_pcm(const int16_t *pcm, size_t samples) {
-    (void)pcm; (void)samples;
+bool ecard_xiaozhi_listen_start(void) {
+    ecard_vad_reset(&s_stub_vad);
+    ++ecard_stub_listen_start_calls;
+    return true;
 }
-void ecard_xiaozhi_reset_mic(void) {}
+bool ecard_xiaozhi_listen_had_audio(void) {
+    return (s_stub_vad.total_ms == 0) || s_stub_vad.voice_detected;
+}
+void ecard_xiaozhi_listen_stop(void) { ++ecard_stub_listen_stop_calls; }
+void ecard_xiaozhi_listen_cancel(void) {
+    ecard_vad_reset(&s_stub_vad);
+    ++ecard_stub_listen_cancel_calls;
+}
+void ecard_xiaozhi_feed_mic_pcm(const int16_t *pcm, size_t samples) {
+    ecard_vad_feed(&s_stub_vad, pcm, samples, ECARD_VOICE_SAMPLE_RATE);
+}
+void ecard_xiaozhi_reset_mic(void) { ecard_vad_reset(&s_stub_vad); }
+bool ecard_xiaozhi_mic_active(void) { return s_stub_vad.total_ms > 0; }
+uint8_t ecard_xiaozhi_mic_amplitude(void) { return s_stub_vad.amplitude; }
+bool ecard_xiaozhi_mic_voice_detected(void) { return s_stub_vad.voice_detected; }
+bool ecard_xiaozhi_mic_vad_complete(void) { return s_stub_vad.end_of_speech; }
 bool ecard_xiaozhi_is_speaking(void) { return ecard_stub_ai_speaking; }
 unsigned ecard_stub_reset_playback_calls = 0;
-void ecard_xiaozhi_reset_playback(void) { ++ecard_stub_reset_playback_calls; }
+void ecard_xiaozhi_reset_playback(void) {
+    ecard_stub_ai_speaking = false;
+    ++ecard_stub_reset_playback_calls;
+}
 bool ecard_xiaozhi_restart_pending(void) { return false; }
 size_t ecard_xiaozhi_read_pcm(int16_t *out, size_t max_samples) {
     (void)out; (void)max_samples; return 0;

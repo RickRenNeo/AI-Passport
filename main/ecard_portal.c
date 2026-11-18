@@ -1,5 +1,6 @@
 #include "ecard_portal.h"
 #include "ecard_netlink.h"
+#include "ecard_opus_arena.h"
 #include "ecard_setup.h"
 #include <ctype.h>
 #include <esp_http_server.h>
@@ -28,6 +29,16 @@ static esp_netif_t *s_ap_netif;
 static TaskHandle_t s_dns_task;
 static volatile bool s_dns_stop;
 static char *s_html;
+
+static void portal_release_html(void) {
+    if (!s_html) return;
+    if (ecard_opus_arena_owns(s_html)) {
+        ecard_opus_arena_return(s_html);
+    } else {
+        free(s_html);
+    }
+    s_html = NULL;
+}
 
 static void copy_bounded(char *dst, size_t dst_size, const char *src) {
     if (!dst || dst_size == 0) return;
@@ -311,7 +322,14 @@ static esp_err_t send_identity_page(httpd_req_t *req, bool show_error) {
              "<input name=id maxlength=16 required autocapitalize=none autocomplete=off>"
              "<label>学校</label><input name=school maxlength=40 required>"
              "<div id=classRow><label>班级（学生）</label>"
-             "<input name=class maxlength=16></div>"
+             "<input name=class maxlength=16>"
+             "<label>当前年级（题库默认保留本年级及前后各一年）</label>"
+             "<select name=grade>"
+             "<option value='' selected>按班级自动识别</option>"
+             "<option value=1>一年级</option><option value=2>二年级</option>"
+             "<option value=3>三年级</option><option value=4>四年级</option>"
+             "<option value=5>五年级</option><option value=6>六年级</option>"
+             "</select></div>"
              "<label>姓名</label><input name=name maxlength=24 required>"
              "<label>主家长绑定手机号（11 位）</label>"
              "<input name=phone maxlength=11 inputmode=numeric pattern='1[0-9]{10}' required>"
@@ -421,6 +439,7 @@ static esp_err_t identity_post(httpd_req_t *req) {
     char id[24] = {0};
     char school[48] = {0};
     char klass[24] = {0};
+    char grade[8] = {0};
     char name[32] = {0};
     char phone[16] = {0};
     char relay[128] = {0};
@@ -431,6 +450,7 @@ static esp_err_t identity_post(httpd_req_t *req) {
                     form_get(body, "name", name, sizeof(name)) &&
                     form_get(body, "phone", phone, sizeof(phone));
     (void)form_get(body, "class", klass, sizeof(klass));
+    (void)form_get(body, "grade", grade, sizeof(grade));
     (void)form_get(body, "relay", relay, sizeof(relay));
     if (!ok) {
         return send_identity_page(req, true);
@@ -448,6 +468,10 @@ static esp_err_t identity_post(httpd_req_t *req) {
 
     if (!ecard_setup_save_identity(&cfg)) {
         return send_identity_page(req, true);
+    }
+    if (cfg.role == ECARD_ACCOUNT_STUDENT &&
+        grade[0] >= '1' && grade[0] <= '6' && grade[1] == '\0') {
+        (void)ecard_setup_save_curriculum((uint8_t)(grade[0] - '0'), NULL, 0);
     }
     if (relay[0] && !ecard_setup_save_relay_url(relay)) {
         return send_identity_page(req, true);
@@ -743,7 +767,17 @@ static void register_probe_uris(void) {
 bool ecard_portal_start(void) {
     if (s_active) return true;
     if (!s_html) {
-        s_html = calloc(1, HTML_MAX);
+        uint8_t *arena_buf = NULL;
+        size_t arena_cap = 0;
+        if (ecard_opus_arena_borrow(&arena_buf, &arena_cap) && arena_buf && arena_cap >= HTML_MAX) {
+            memset(arena_buf, 0, HTML_MAX);
+            s_html = (char *)arena_buf;
+        } else {
+            if (arena_buf) {
+                ecard_opus_arena_return(arena_buf);
+            }
+            s_html = calloc(1, HTML_MAX);
+        }
         if (!s_html) {
             ESP_LOGE(TAG, "无法分配配网页面缓冲");
             return false;
@@ -770,8 +804,7 @@ bool ecard_portal_start(void) {
     if (esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK ||
         esp_wifi_set_config(WIFI_IF_AP, &ap_cfg) != ESP_OK) {
         ESP_LOGE(TAG, "无法启动配网热点");
-        free(s_html);
-        s_html = NULL;
+        portal_release_html();
         return false;
     }
 
@@ -796,8 +829,7 @@ bool ecard_portal_start(void) {
     config.uri_match_fn = httpd_uri_match_wildcard;
     if (httpd_start(&s_server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "HTTP 服务启动失败");
-        free(s_html);
-        s_html = NULL;
+        portal_release_html();
         return false;
     }
 
@@ -859,8 +891,7 @@ void ecard_portal_stop(void) {
         httpd_stop(s_server);
         s_server = NULL;
     }
-    free(s_html);
-    s_html = NULL;
+    portal_release_html();
 
     esp_wifi_set_mode(WIFI_MODE_STA);
     ESP_LOGI(TAG, "配网热点与 Web 服务已关闭，内存已释放（堆剩余 %u）",
