@@ -154,16 +154,38 @@ void ecard_ui_quiz_refresh(void);
  */
 void ecard_ui_flashcard_refresh(void);
 
+/** 二级题库选择页步骤：先在保留的 <=3 个年级中选年级，再选分组/单元。 */
+typedef enum {
+    ECARD_PICK_STEP_GRADE = 0,
+    ECARD_PICK_STEP_DECK  = 1
+} ecard_pick_step_t;
+
+/** 当前题库选择页所处步骤（选年级 / 选分组单元）。 */
+ecard_pick_step_t ecard_ui_pick_step(void);
+
+/** 切换题库选择页步骤；若当前正处于选择页则同步重绘。 */
+void ecard_ui_pick_set_step(ecard_pick_step_t step);
+
+/** 当前题库选择页选中的真实年级号（1..6，来自设备保留的 <=3 个年级列表）。 */
+uint8_t ecard_ui_pick_selected_grade(void);
+
 /**
- * @brief 设置年级选择页的当前高亮项（0..ECARD_GRADE_COUNT-1）。
+ * @brief 年级选择步骤当前高亮槽位下标（0 .. active_grade_count-1）。
  */
 uint8_t ecard_ui_grade_selection(void);
 
-/** 在年级选择页上下移动（delta 为 +1/-1，循环）。 */
+/** 在设备保留的年级列表中上下循环移动（delta 为 +1/-1）。 */
 void ecard_ui_grade_move(int delta);
 
-/** 闪卡页显示用：进入卡组前记录本次要展示的年级（1..6）。 */
+/** 分组/单元选择步骤当前高亮项下标（0 .. deck_count-1）。 */
+uint8_t ecard_ui_deck_selection(void);
+
+/** 在当前年级的古诗分组或英语单元列表中上下循环移动（delta 为 +1/-1）。 */
+void ecard_ui_deck_move(int delta);
+
+/** 闪卡页显示用：进入卡组前记录本次要展示的年级（1..6）与分组/单元标题。 */
 void ecard_ui_set_deck_grade(uint8_t grade);
+void ecard_ui_set_deck_meta(uint8_t grade, const char *deck_title);
 
 /**
  * @brief 按 ecard_pomodoro 当前状态重绘番茄钟页面。
@@ -199,6 +221,12 @@ void ecard_ui_show_recording_modal(uint8_t remaining_sec, uint8_t audio_amplitud
  * @param audio_amplitude 实时振幅（0..100），无采样时传 0
  */
 void ecard_ui_show_ai_listen_modal(uint8_t remaining_sec, uint8_t audio_amplitude);
+
+/** 当前录音/小智聆听弹窗显示的剩余秒数（未弹窗时为 0）。 */
+uint8_t ecard_ui_modal_remaining_sec(void);
+
+/** 标记番茄钟是否因小智语音交互处于自动暂停态，用于提示文案与防息屏保护。 */
+void ecard_ui_set_pomodoro_ai_paused(bool paused);
 
 /**
  * @brief 修改当前页面底部提示；页面没有提示条时忽略。

@@ -335,6 +335,36 @@ static void test_http_pairing_privacy_and_permissions(void) {
                "AABBCCDDEEFF", "192.168.1.42", 80,
                resp, sizeof(resp), &dirty) == 400);
 
+    // Parent curriculum LAN API: unauth -> 401, GET -> default, POST default window & custom <=3 grades, >3 -> 400
+    assert(ecard_cat_room_handle_http("GET", "/api/curriculum", NULL, NULL,
+                                        "AABBCCDDEEFF", "192.168.1.42", 80,
+                                        resp, sizeof(resp), &dirty) == 401);
+    assert(ecard_cat_room_handle_http("GET", "/api/curriculum", mom_auth, NULL,
+                                        "AABBCCDDEEFF", "192.168.1.42", 80,
+                                        resp, sizeof(resp), &dirty) == 200);
+    assert(strstr(resp, "\"max_grades\":3") != NULL);
+
+    dirty = false;
+    assert(ecard_cat_room_handle_http("POST", "/api/curriculum", mom_auth,
+                                        "{\"current_grade\":4}",
+                                        "AABBCCDDEEFF", "192.168.1.42", 80,
+                                        resp, sizeof(resp), &dirty) == 200);
+    assert(dirty);
+    assert(strstr(resp, "\"current_grade\":4") != NULL);
+    assert(strstr(resp, "\"grades\":[3,4,5]") != NULL);
+
+    assert(ecard_cat_room_handle_http("POST", "/api/curriculum", mom_auth,
+                                        "{\"current_grade\":6,\"grades\":[6,5]}",
+                                        "AABBCCDDEEFF", "192.168.1.42", 80,
+                                        resp, sizeof(resp), &dirty) == 200);
+    assert(strstr(resp, "\"current_grade\":6") != NULL);
+    assert(strstr(resp, "\"grades\":[5,6]") != NULL);
+
+    assert(ecard_cat_room_handle_http("POST", "/api/curriculum", mom_auth,
+                                        "{\"current_grade\":3,\"grades\":[1,2,3,4]}",
+                                        "AABBCCDDEEFF", "192.168.1.42", 80,
+                                        resp, sizeof(resp), &dirty) == 400);
+
     // Primary self-unbind clears all parents while preserving room unlocks/equipped
     assert(ecard_cat_room_handle_http("POST", "/api/pair/unbind", mom_auth, "{}",
                                         "AABBCCDDEEFF", "192.168.1.42", 80,

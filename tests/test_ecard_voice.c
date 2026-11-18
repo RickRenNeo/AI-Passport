@@ -172,30 +172,14 @@ static void test_playback_stop_and_silence_guard(void) {
     assert(ecard_voice_playback_read(out, 16) == 0);
 }
 
-static void test_demo_voice_playback(void) {
+static void test_no_clip_playback_guard(void) {
     ecard_voice_init();
     ecard_voice_clip_release();
 
-    // 网络留言没有音频负载时用内置演示语音，必须有真实时长与幅度
-    assert(ecard_voice_demo_duration_sec() > 0);
-    assert(ecard_voice_playback_start_demo());
-    assert(ecard_voice_get_state() == ECARD_VOICE_PLAYING);
-
-    int16_t out[160];
-    size_t total = 0;
-    int peak = 0;
-    for (;;) {
-        size_t n = ecard_voice_playback_read(out, 160);
-        if (n == 0) break;
-        for (size_t i = 0; i < n; ++i) {
-            int v = abs((int)out[i]);
-            if (v > peak) peak = v;
-        }
-        total += n;
-        assert(total <= (size_t)(ecard_voice_demo_duration_sec() + 1) * ECARD_VOICE_SAMPLE_RATE);
-    }
-    assert(total > ECARD_VOICE_SAMPLE_RATE);
-    assert(peak > 500);
+    // 无本地录音或 SPIFFS 音频文件时，不再回退内置合成占位语音，直接拒绝进入回放态
+    assert(!ecard_voice_has_clip());
+    assert(!ecard_voice_playback_start());
+    assert(!ecard_voice_playback_start_file("", true));
     assert(ecard_voice_get_state() == ECARD_VOICE_IDLE);
 }
 
@@ -330,7 +314,7 @@ int main(void) {
     test_recording_max_buffer_cutoff();
     test_playback_round_trip();
     test_playback_stop_and_silence_guard();
-    test_demo_voice_playback();
+    test_no_clip_playback_guard();
     test_file_playback_round_trip();
     test_chunked_10s_recording_and_save_to_file();
     printf("ecard_voice tests passed!\n");

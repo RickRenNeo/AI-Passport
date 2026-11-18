@@ -30,9 +30,9 @@ and selected explicitly by every text widget in `main/ecard_ui.c`.
 | Source URL | `https://github.com/notofonts/noto-cjk/raw/Sans2.004/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf` |
 | Source SHA-256 | `2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b` |
 | License | SIL Open Font License 1.1, [`fonts/LICENSE-NotoSansCJK.txt`](fonts/LICENSE-NotoSansCJK.txt) |
-| Converter | `lv_font_conv` 1.5.3, `--bpp 2 --format lvgl --no-compress` (2 bpp keeps four antialiasing levels and halves the bitmap payload) |
-| Coverage | printable ASCII + every non-ASCII character literally used by the eCard sources + the UI symbol set; 12/16/22 px also include GB2312 level-1 so user-entered school, class, and name render correctly; 9 px and 48 px are ASCII-only |
-| Compiled size | roughly 1.0 MiB of font data in Flash; the application is 2.66 MB in a 4.03 MB OTA slot |
+| Converter | `lv_font_conv` 1.5.3, `--bpp 2 --format lvgl` (2 bpp + LVGL RLE/XOR bitmap compression via `CONFIG_LV_USE_FONT_COMPRESSED=y`) |
+| Coverage | printable ASCII + every non-ASCII character literally used by the eCard sources and `tools/ecard_curriculum_data.py` + the UI symbol set; 12/16/22 px also include GB2312 level-1 so user-entered school, class, and name render correctly; 9 px and 48 px are ASCII-only |
+| Compiled size | roughly 0.65 MiB of RLE-compressed font data in Flash (zero system-heap cost) |
 
 Regenerate the checked-in sources from the repository root:
 
@@ -83,23 +83,6 @@ Store reusable music and sound-effect sources in `music/`.
 - Prefer 16 kHz, 16-bit mono PCM when it matches the current BSP audio path.
 - Check Flash and internal-RAM cost before embedding audio; stream or chunk long recordings.
 - Do not commit media without redistribution permission.
-
-### eCard demo voice
-
-[`sounds/ecard_demo_voice.c`](sounds/ecard_demo_voice.c) is a 7.3 s demo
-message used while network voice messages carry no audio payload. It is 4-bit
-IMA-ADPCM at 16 kHz mono, starts from decoder state 0/0, and costs about
-59 KB of Flash.
-
-| Item | Value |
-| --- | --- |
-| Text | Chinese demo line rendered locally by the generator (a mother's reminder to a pupil) |
-| Voice | macOS `say -v Tingting` (zh_CN), a synthetic placeholder, not a real person |
-| Generator | `python3 tools/generate_ecard_demo_voice.py` (needs macOS `say`/`afconvert`) |
-| Destination | Compiled into `main` by `main/CMakeLists.txt`; playback handled by `main/ecard_voice.c` |
-
-Treat this clip as a demo placeholder and replace it with Xiaozhi TTS audio
-once the streaming backend is connected.
 
 ## Battery profiles
 

@@ -172,18 +172,40 @@ static void test_page_navigation(void) {
     assert(ecard_ui_get_page() == ECARD_UI_PAGE_PAIR);
     assert(ecard_cat_room_is_pairing_active());
 
-    // 模态层存在时页面切换被拒绝
-    // 年级选择：循环移动与设置显示年级
-    ecard_ui_grade_move(1);
+    // 二级题库选择：仅在保留的 <=3 个年级（默认 [2,3,4]，当前 3 年级槽位 1）间循环，并支持二级单元滚动
+    ecard_cards_reset_curriculum();
+    ecard_ui_show_page(ECARD_UI_PAGE_WORD_PICK);
+    assert(ecard_ui_pick_step() == ECARD_PICK_STEP_GRADE);
     assert(ecard_ui_grade_selection() == 1);
+    assert(ecard_ui_pick_selected_grade() == 3);
     ecard_ui_grade_move(1);
     assert(ecard_ui_grade_selection() == 2);
-    ecard_ui_grade_move(-3);
-    assert(ecard_ui_grade_selection() == ECARD_GRADE_COUNT - 1);
-    ecard_ui_set_deck_grade(6);
-    ecard_ui_set_deck_grade(0);
+    assert(ecard_ui_pick_selected_grade() == 4);
     ecard_ui_grade_move(1);
     assert(ecard_ui_grade_selection() == 0);
+    assert(ecard_ui_pick_selected_grade() == 2);
+    ecard_ui_grade_move(-1);
+    assert(ecard_ui_grade_selection() == 2);
+    assert(ecard_ui_pick_selected_grade() == 4);
+
+    // 进入第 2 步选英语单元（12 个单元循环滚动）
+    ecard_ui_pick_set_step(ECARD_PICK_STEP_DECK);
+    assert(ecard_ui_pick_step() == ECARD_PICK_STEP_DECK);
+    assert(ecard_ui_deck_selection() == 0);
+    for (int i = 0; i < 7; ++i) {
+        ecard_ui_deck_move(1);
+    }
+    assert(ecard_ui_deck_selection() == 7);
+    ecard_ui_deck_move(5);
+    assert(ecard_ui_deck_selection() == 0); // 12 单元回绕
+    ecard_ui_deck_move(-1);
+    assert(ecard_ui_deck_selection() == 11);
+    ecard_ui_set_deck_meta(4, "下册 Unit 6");
+    ecard_ui_set_deck_grade(0);
+
+    ecard_ui_show_page(ECARD_UI_PAGE_PAIR);
+    assert(ecard_ui_get_page() == ECARD_UI_PAGE_PAIR);
+    assert(ecard_cat_room_is_pairing_active());
 
     ecard_ui_show_sos_pending(3);
     ecard_ui_show_page(ECARD_UI_PAGE_HOME);

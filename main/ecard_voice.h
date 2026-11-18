@@ -114,12 +114,6 @@ bool ecard_voice_has_clip(void);
 bool ecard_voice_playback_start(void);
 
 /**
- * @brief 回放内置演示留言（网络留言没有音频负载时使用）
- * @return true 已进入回放状态
- */
-bool ecard_voice_playback_start_demo(void);
-
-/**
  * @brief 从本地持久化文件（如 SPIFFS 的 .adp）流式解码回放 ADPCM 语音
  *
  * @param path      ADPCM 文件路径
@@ -127,9 +121,6 @@ bool ecard_voice_playback_start_demo(void);
  * @return true 成功打开并进入回放状态
  */
 bool ecard_voice_playback_start_file(const char *path, bool expand_8k);
-
-/** 内置演示留言的时长（秒），用于匹配留言卡片与播放进度。 */
-uint8_t ecard_voice_demo_duration_sec(void);
 
 /**
  * @brief 取出回放 PCM（16 kHz 单声道，一个 ADPCM 半字节对应一个样本）

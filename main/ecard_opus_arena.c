@@ -28,13 +28,15 @@ static const char *TAG = "opus_arena";
  * 24524 字节。后备区设为 25 KB（25600 字节，留出 1076 字节余量），
  * 避免过多占用静态 DRAM 影响 TLS 握手内存；同时加硬性上限防越界。 */
 #define ARENA_BYTES (25u * 1024u)
-/* 只接管编码器那一块大分配；解码器（约 9 KB）仍走系统堆，避免互相抢。 */
+/* 实测：24 kHz 单声道解码器状态约 17.9 KB，16 kHz 单声道编码器状态 24524 B。
+ * 二者在 xz_audio_task 内严格半双工互斥打开，统一拦截 ≥12 KB 的主状态分配进入 25 KB 静态池；
+ * 8 字节外层句柄仍走系统堆，避免占掉单槽后备区。 */
 #define ARENA_MIN_REQUEST (12u * 1024u)
 
 static uint8_t s_arena[ARENA_BYTES] __attribute__((aligned(16)));
 
-static bool s_active;       // 处于 esp_audio_enc_open 窗口内
-static bool s_in_use;       // 后备区已被编码器或外部借用拿走
+static bool s_active;       // 处于 esp_audio_dec_open / enc_open 窗口内
+static bool s_in_use;       // 后备区已被编解码器或外部借用拿走
 static size_t s_used;       // 当前占用的字节数（单块，便于回收）
 static void *s_owner;       // 后备区里那块内存的地址
 
@@ -50,6 +52,10 @@ static portMUX_TYPE s_arena_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool arena_contains(const void *ptr) {
     const uint8_t *p = (const uint8_t *)ptr;
     return p >= s_arena && p < s_arena + ARENA_BYTES;
+}
+
+bool ecard_opus_arena_owns(const void *ptr) {
+    return arena_contains(ptr);
 }
 
 void ecard_opus_arena_begin(void) {
@@ -111,20 +117,32 @@ void media_lib_free(void *ptr);
 
 void *media_lib_module_malloc(const char *module, size_t size) {
     (void)module;
+    bool take_arena = false;
+    bool oversize = false;
+    void *taken_ptr = NULL;
+
+    ARENA_LOCK();
     if (s_active && !s_in_use && size >= ARENA_MIN_REQUEST) {
-        // 后备区是固定大小的静态数组：宁可直接失败，也不能返回一块装不下
-        // 的内存，否则 libopus 会写穿到相邻的 LVGL 内存池并触发重启。
         if (size > ARENA_BYTES) {
-            ESP_LOGW(TAG, "编码器申请 %u 字节超过后备区 %u，已拒绝",
-                     (unsigned)size, (unsigned)ARENA_BYTES);
-            return NULL;
+            oversize = true;
+        } else {
+            s_owner = s_arena;
+            s_used = size;
+            s_in_use = true;
+            taken_ptr = s_owner;
+            take_arena = true;
         }
-        /* 单块后备分配：编码器关闭后 free 会把整块还回来。 */
-        s_owner = s_arena;
-        s_used = size;
-        s_in_use = true;
-        ESP_LOGI(TAG, "编码器大块分配走后备区: %u 字节", (unsigned)size);
-        return s_owner;
+    }
+    ARENA_UNLOCK();
+
+    if (oversize) {
+        ESP_LOGW(TAG, "Opus 申请 %u 字节超过后备区 %u，已拒绝",
+                 (unsigned)size, (unsigned)ARENA_BYTES);
+        return NULL;
+    }
+    if (take_arena) {
+        ESP_LOGI(TAG, "Opus 大块分配走后备区: %u 字节", (unsigned)size);
+        return taken_ptr;
     }
     return malloc(size);
 }
@@ -142,11 +160,12 @@ void *media_lib_module_calloc(const char *module, size_t num, size_t size) {
 void *media_lib_module_realloc(const char *module, void *ptr, size_t size) {
     if (!ptr) return media_lib_module_malloc(module, size);
     if (arena_contains(ptr)) {
-        /* 后备区里的块无法原地扩展：搬到系统堆（后备区保持占用，
-         * 等编码器整体关闭时再由 media_lib_free 释放）。 */
+        ARENA_LOCK();
+        const size_t copy_len = (s_used < size) ? s_used : size;
+        ARENA_UNLOCK();
         void *fresh = malloc(size);
-        if (fresh && s_used) {
-            memcpy(fresh, ptr, s_used < size ? s_used : size);
+        if (fresh && copy_len > 0) {
+            memcpy(fresh, ptr, copy_len);
         }
         return fresh;
     }
@@ -156,11 +175,17 @@ void *media_lib_module_realloc(const char *module, void *ptr, size_t size) {
 void media_lib_free(void *ptr) {
     if (!ptr) return;
     if (arena_contains(ptr)) {
-        if (ptr == s_owner) {
+        bool released = false;
+        ARENA_LOCK();
+        if (ptr == s_owner && s_in_use) {
             s_in_use = false;
             s_owner = NULL;
             s_used = 0;
-            ESP_LOGI(TAG, "编码器已释放后备区");
+            released = true;
+        }
+        ARENA_UNLOCK();
+        if (released) {
+            ESP_LOGI(TAG, "Opus 已释放后备区");
         }
         return; /* 静态区不需要 free */
     }

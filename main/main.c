@@ -17,6 +17,7 @@
 #include "freertos/task.h"
 
 #include "ecard_app.h"
+#include "ecard_cards.h"
 #include "ecard_messages.h"
 #include "ecard_netlink.h"
 #include "ecard_portal.h"
@@ -189,18 +190,19 @@ static void input_task(void *arg) {
     }
 }
 
-// 周期性时钟心跳任务：每秒更新状态栏（时间、电量）并驱动课间判定与无操作空闲计时
+// 周期性时钟心跳任务：200ms 驱动 AI 端点检测/波形/多轮续聊，整秒更新状态栏（时间、电量）与网络心跳
 static void tick_task(void *arg) {
     (void)arg;
     uint8_t sim_hour = 9;
     uint8_t sim_min = 40;
     uint8_t sim_sec = 0;
     uint32_t sim_ms = 0;
+    uint32_t sec_accum_ms = 1000;
     int lvgl_log = 0;
     int64_t last_tick_us = esp_timer_get_time();
 
     for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(200));
         const int64_t now_us = esp_timer_get_time();
         int64_t raw_ms = (now_us - last_tick_us) / 1000;
         if (raw_ms < 1) raw_ms = 1;
@@ -226,10 +228,15 @@ static void tick_task(void *arg) {
             }
         }
 
-        ecard_netlink_tick();
-        ecard_xiaozhi_log_stats();
+        sec_accum_ms += delta_ms;
+        const bool full_sec = (sec_accum_ms >= 1000);
+        if (full_sec) {
+            sec_accum_ms %= 1000;
+            ecard_netlink_tick();
+            ecard_xiaozhi_log_stats();
+        }
 
-        int soc_val = bsp_battery_soc();
+        int soc_val = full_sec ? bsp_battery_soc() : 0;
         uint8_t hour = sim_hour;
         uint8_t minute = sim_min;
         if (ecard_time_is_synced()) {
@@ -240,13 +247,15 @@ static void tick_task(void *arg) {
         }
 
         if (bsp_lvgl_lock(200)) {
-            char time_buf[16];
-            snprintf(time_buf, sizeof(time_buf), "%02d:%02d", hour, minute);
-            ecard_ui_update_status(time_buf, soc_val, false, ecard_netlink_is_connected());
+            if (full_sec) {
+                char time_buf[16];
+                snprintf(time_buf, sizeof(time_buf), "%02d:%02d", hour, minute);
+                ecard_ui_update_status(time_buf, soc_val, false, ecard_netlink_is_connected());
+                ecard_ui_setup_refresh();
+            }
             // 小智 AI 会话只按需连接：状态栏绿点表示当前可以长按 UP 追问。
             ecard_ui_set_ai_connected(ecard_xiaozhi_ws_connected() &&
-                                          ecard_xiaozhi_session_ready());
-            ecard_ui_setup_refresh();
+                                      ecard_xiaozhi_session_ready());
             const ecard_ui_idle_action_t idle_act = ecard_ui_poll_idle_state(delta_ms);
             if (idle_act == ECARD_UI_IDLE_DIM) {
                 s_backlight_state = BACKLIGHT_DIM;
@@ -262,9 +271,7 @@ static void tick_task(void *arg) {
                 s_backlight_state = BACKLIGHT_ACTIVE;
                 bsp_display_backlight(100);
             }
-            // LVGL 池是静态 .bss：它的大小直接决定系统堆的连续余量。
-            // 每 5 秒报一次真实用量/峰值，才能判断能否缩池给 Opus 编码器让路。
-            if (++lvgl_log >= 5) {
+            if (full_sec && ++lvgl_log >= 5) {
                 lvgl_log = 0;
                 lv_mem_monitor_t mon;
                 lv_mem_monitor(&mon);
@@ -406,13 +413,17 @@ void app_main(void) {
     ecard_setup_init();
 
     // 挂载 1 MB SPIFFS 语音留言分区（必须在 ecard_app_init 之前，否则留言会回退成内存演示数据）
-    (void)ecard_messages_mount_spiffs();
+    const bool spiffs_ok = ecard_messages_mount_spiffs();
 
     // 初始化 eCard 核心应用引擎与 UI
     ecard_app_init();
     // 必须在 ecard_app_init() 之后应用：该函数会把档案重置为出厂默认值，
     // 过早写入会被覆盖，导致首页与证件页看不到用户配置的身份。
     ecard_setup_apply_profile();
+    if (spiffs_ok) {
+        // 只在 SPIFFS 保留最多 3 个年级的古诗古文/英语题库包（首次开机或配置变更时物化并删除非保留年级包）
+        (void)ecard_cards_mount_dir("/spiffs");
+    }
     ESP_LOGI(TAG, "堆剩余 %u 字节, 最大连续块 %u 字节",
              (unsigned)esp_get_free_heap_size(),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
@@ -441,7 +452,7 @@ void app_main(void) {
         ecard_app_set_record_full_cb(on_record_full);
         // 编码器/解码器开关已移入 xz_audio 独立任务；按键任务含录音落盘与索引保存，取 7 KB 栈。
         xTaskCreate(input_task, "ecard_input", 7168, NULL, 5, &s_input_task);
-        xTaskCreate(tick_task, "ecard_tick", 3072, NULL, 3, &s_tick_task);
+        xTaskCreate(tick_task, "ecard_tick", 4608, NULL, 3, &s_tick_task);
         xTaskCreate(audio_task, "ecard_audio", 4096, NULL, 4, &s_audio_task);
     }
 

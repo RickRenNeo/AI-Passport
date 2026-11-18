@@ -6,9 +6,9 @@ Source font
     License: SIL Open Font License 1.1 (see assets/fonts/LICENSE-NotoSansCJK.txt).
 
 Converter
-    lv_font_conv 1.5.3 (https://github.com/lvgl/lv_font_conv), run with
-    ``--no-compress`` so the generated fonts do not depend on
-    CONFIG_LV_USE_FONT_COMPRESSED.
+    lv_font_conv 1.5.3 (https://github.com/lvgl/lv_font_conv), run with LVGL's
+    built-in RLE/XOR bitmap compression enabled (requires
+    CONFIG_LV_USE_FONT_COMPRESSED=y in sdkconfig.defaults).
 
 Character inventory
     * printable ASCII;
@@ -69,6 +69,8 @@ TEXT_SOURCES = (
     "main/ecard_pomodoro.c",
     "main/ecard_cat_room.c",
     "main/ecard_voice.c",
+    "main/ecard_setup.c",
+    "tools/ecard_curriculum_data.py",
 )
 # Symbols that must survive future text edits even if no current literal uses
 # them. Keep this list small and verify it in tests/test_ecard_fonts.py.
@@ -174,7 +176,6 @@ def generate_size(converter: str, font: Path, size: int, symbols: set[str]) -> N
         "--size", str(size),
         "--bpp", str(BPP),
         "--format", "lvgl",
-        "--no-compress",
         "--lv-font-name", f"ecard_font_{size}",
         "--lv-include", "lvgl.h",
         "--output", str(output),

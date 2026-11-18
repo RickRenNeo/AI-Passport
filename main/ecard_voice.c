@@ -67,11 +67,6 @@ static bool s_play_expand_8k = false;
 static int16_t s_decoder_predicted = 0;
 static int8_t s_decoder_index = 0;
 
-// 由 tools/generate_ecard_demo_voice.py 生成，见 assets/sounds/。
-extern const uint8_t ecard_demo_voice_adpcm[];
-extern const size_t ecard_demo_voice_adpcm_len;
-extern const uint8_t ecard_demo_voice_duration_sec;
-
 uint8_t ecard_adpcm_encode_sample(int16_t sample, int16_t *predicted, int8_t *index) {
     int32_t diff = (int32_t)sample - (int32_t)(*predicted);
     uint8_t nibble = 0;
@@ -487,23 +482,6 @@ bool ecard_voice_playback_start(void) {
     return true;
 }
 
-bool ecard_voice_playback_start_demo(void) {
-    if (ecard_demo_voice_adpcm_len == 0) return false;
-
-    close_play_file();
-    s_play_src = ecard_demo_voice_adpcm;
-    s_play_pos = 0;
-    s_play_len = ecard_demo_voice_adpcm_len;
-    s_play_byte_ready = false;
-    s_play_high_nibble = false;
-    s_decoder_predicted = 0;
-    s_decoder_index = 0;
-    s_play_active = true;
-    s_play_expand_8k = false; // 演示语音本身是 16 kHz
-    s_state = ECARD_VOICE_PLAYING;
-    return true;
-}
-
 bool ecard_voice_playback_start_file(const char *path, bool expand_8k) {
     if (!path || !path[0]) return false;
 
@@ -525,10 +503,6 @@ bool ecard_voice_playback_start_file(const char *path, bool expand_8k) {
     s_play_expand_8k = expand_8k;
     s_state = ECARD_VOICE_PLAYING;
     return true;
-}
-
-uint8_t ecard_voice_demo_duration_sec(void) {
-    return ecard_demo_voice_duration_sec;
 }
 
 static bool next_play_byte(uint8_t *out) {

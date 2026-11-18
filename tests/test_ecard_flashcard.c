@@ -44,12 +44,18 @@ static void test_every_grade_has_cards(void) {
 }
 
 static void test_word_audio_index_is_contiguous(void) {
+    ecard_cards_reset_curriculum();
     uint16_t expected = 0;
     for (uint8_t grade = 1; grade <= ECARD_GRADE_COUNT; ++grade) {
-        uint8_t count = 0;
-        (void)ecard_cards_words(grade, &count);
         assert(ecard_cards_word_offset(grade) == expected);
-        expected += count;
+        const uint8_t decks = ecard_cards_deck_count(ECARD_CARD_WORD, grade);
+        assert(decks == 12);
+        for (uint8_t d = 0; d < decks; ++d) {
+            uint8_t count = 0;
+            assert(ecard_cards_word_deck_offset(grade, d) == expected);
+            assert(ecard_cards_load_deck(ECARD_CARD_WORD, grade, d, &count) != NULL);
+            expected += count;
+        }
     }
     assert(ecard_cards_word_total() == expected);
     assert(expected <= 1000);

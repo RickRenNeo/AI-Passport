@@ -14,6 +14,7 @@
 #include "ecard_quiz.h"
 #include "ecard_ui.h"
 #include "ecard_voice.h"
+#include "ecard_xiaozhi.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -70,10 +71,11 @@ static void test_ecard_app_message_play_and_mutual_exclusion(void) {
     // 演示数据里有 2 条未读（妈妈 + 王老师）
     assert(ecard_messages_unread_count() == 2);
 
-    // 首页短按 OK 直接收听最新一条未读
+    // 首页短按 OK 直接查看/收听最新一条未读；无音频负载时按消息自身时长展示转写，不回退合成占位音
     ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
     assert(ecard_app_get_state() == ECARD_APP_STATE_PLAYING);
     assert(ecard_ui_get_modal() == ECARD_UI_MODAL_PLAYING);
+    assert(ecard_voice_get_state() == ECARD_VOICE_IDLE);
 
     // 推进时钟至播完（演示语音约 7 秒，留 1 秒容错）
     for (int s = 0; s < 10; ++s) {
@@ -267,10 +269,11 @@ static void test_ecard_app_quiz_flow(void) {
 }
 
 static void test_ecard_app_poem_deck_flow(void) {
+    ecard_cards_reset_curriculum();
     ecard_app_init();
     clear_unread_messages();
 
-    // 首页 -> 菜单 -> 古诗接句（第 3 项）-> 年级选择
+    // 默认出厂档案为“三年级(2)班”，设备保留 [2, 3, 4] 三个年级，默认光标停在三年级（槽位 1）
     ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
     assert(ecard_ui_get_page() == ECARD_UI_PAGE_MENU);
     ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_CLICK); // QUIZ
@@ -278,15 +281,25 @@ static void test_ecard_app_poem_deck_flow(void) {
     assert(ecard_ui_menu_selection() == ECARD_MENU_POEM);
     ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
     assert(ecard_ui_get_page() == ECARD_UI_PAGE_POEM_PICK);
-    assert(ecard_ui_grade_selection() == 0);
+    assert(ecard_ui_pick_step() == ECARD_PICK_STEP_GRADE);
+    assert(ecard_ui_pick_selected_grade() == 3);
 
-    // 选到三年级再进入
+    // 第 1 步按 OK 进入三年级古诗古文分组列表，再选第 3 组（古文组）按 OK 进入闪卡
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
+    assert(ecard_ui_get_page() == ECARD_UI_PAGE_POEM_PICK);
+    assert(ecard_ui_pick_step() == ECARD_PICK_STEP_DECK);
+    assert(ecard_ui_deck_selection() == 0);
     ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_CLICK);
     ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_CLICK);
-    assert(ecard_ui_grade_selection() == 2);
+    assert(ecard_ui_deck_selection() == 2);
+
+    uint8_t expected_count = 0;
+    (void)ecard_cards_load_deck(ECARD_CARD_POEM, 3, 2, &expected_count);
+    assert(expected_count > 0);
+
     ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
     assert(ecard_ui_get_page() == ECARD_UI_PAGE_POEM);
-    assert(ecard_flashcard_total() == 10);
+    assert(ecard_flashcard_total() == expected_count);
     assert(ecard_flashcard_current() != NULL);
 
     // 未翻面时 UP/DOWN 不记录
@@ -301,17 +314,30 @@ static void test_ecard_app_poem_deck_flow(void) {
     const unsigned reset_poem_mark = ecard_stub_reset_playback_calls;
     ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_CLICK);
     assert(ecard_stub_reset_playback_calls == reset_poem_mark + 1);
-    assert(ecard_flashcard_remaining() == 9);
+    assert(ecard_flashcard_remaining() == expected_count - 1);
 
-    // 长按 OK 退出到菜单
+    // 长按 OK 从闪卡返回分组列表（保持第 2 步），再长按返回选年级（第 1 步），再长按回主菜单
     const unsigned reset_poem_exit = ecard_stub_reset_playback_calls;
     ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_LONG);
     assert(ecard_stub_reset_playback_calls == reset_poem_exit + 1);
+    assert(ecard_ui_get_page() == ECARD_UI_PAGE_POEM_PICK);
+    assert(ecard_ui_pick_step() == ECARD_PICK_STEP_DECK);
+    assert(ecard_ui_deck_selection() == 2);
+
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_LONG);
+    assert(ecard_ui_get_page() == ECARD_UI_PAGE_POEM_PICK);
+    assert(ecard_ui_pick_step() == ECARD_PICK_STEP_GRADE);
+
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_LONG);
     assert(ecard_ui_get_page() == ECARD_UI_PAGE_MENU);
 }
 
 static void test_ecard_app_word_deck_flow(void) {
+    ecard_cards_reset_curriculum();
+    // 模拟家长把学生年级配置为六年级（设备保留 [4, 5, 6] 年级）
+    assert(ecard_cards_set_curriculum(6, NULL, 0));
     ecard_app_init();
+    assert(ecard_cards_set_curriculum(6, NULL, 0));
     clear_unread_messages();
 
     ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
@@ -322,35 +348,46 @@ static void test_ecard_app_word_deck_flow(void) {
     assert(ecard_ui_menu_selection() == ECARD_MENU_WORD);
     ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
     assert(ecard_ui_get_page() == ECARD_UI_PAGE_WORD_PICK);
+    assert(ecard_ui_pick_step() == ECARD_PICK_STEP_GRADE);
+    // 当前年级为 6，默认停在 [4, 5, 6] 的槽位 2（六年级）
+    assert(ecard_ui_grade_selection() == 2);
+    assert(ecard_ui_pick_selected_grade() == 6);
 
-    // 选到六年级
-    for (int i = 0; i < 5; ++i) {
+    // 按 OK 进入六年级 12 个英语单元列表，选到第 5 个单元（index = 4，上册 Unit 5）
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
+    assert(ecard_ui_pick_step() == ECARD_PICK_STEP_DECK);
+    for (int i = 0; i < 4; ++i) {
         ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_CLICK);
     }
-    assert(ecard_ui_grade_selection() == 5);
+    assert(ecard_ui_deck_selection() == 4);
     ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
     assert(ecard_ui_get_page() == ECARD_UI_PAGE_WORD);
-    assert(ecard_flashcard_total() == 47);
-    assert(ecard_flashcard_audio_index() == ecard_cards_word_offset(6));
+    assert(ecard_flashcard_total() == 10);
+    assert(ecard_flashcard_audio_index() == ecard_cards_word_deck_offset(6, 4));
 
-    // 翻面只换文字，不触发新的朗读（单测无法观测“是否重新开始”，
-    // 因此只验证翻面后仍停留在同一张卡的发音下标）
+    // 翻面只换文字，保持在同一张卡的发音下标
     ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
     assert(ecard_flashcard_is_flipped());
-    assert(ecard_flashcard_audio_index() == ecard_cards_word_offset(6));
+    assert(ecard_flashcard_audio_index() == ecard_cards_word_deck_offset(6, 4));
 
     // 记认识后自动抽下一张，切换时必须中止上一张卡的朗读和例句追问
     extern unsigned ecard_stub_reset_playback_calls;
     const unsigned reset_word_mark = ecard_stub_reset_playback_calls;
     ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_CLICK);
     assert(ecard_stub_reset_playback_calls == reset_word_mark + 1);
-    assert(ecard_flashcard_audio_index() == ecard_cards_word_offset(6) + 1);
+    assert(ecard_flashcard_audio_index() == ecard_cards_word_deck_offset(6, 4) + 1);
 
-    // 长按 OK 退出闪卡页
+    // 长按 OK 退出闪卡页回到单元列表，再连按两次长按 OK 退回菜单
     const unsigned reset_word_exit = ecard_stub_reset_playback_calls;
     ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_LONG);
     assert(ecard_stub_reset_playback_calls == reset_word_exit + 1);
+    assert(ecard_ui_get_page() == ECARD_UI_PAGE_WORD_PICK);
+    assert(ecard_ui_pick_step() == ECARD_PICK_STEP_DECK);
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_LONG);
+    assert(ecard_ui_pick_step() == ECARD_PICK_STEP_GRADE);
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_LONG);
     assert(ecard_ui_get_page() == ECARD_UI_PAGE_MENU);
+    ecard_cards_reset_curriculum();
 }
 
 static void test_ecard_app_pomodoro_flow(void) {
@@ -441,7 +478,30 @@ static void test_ecard_app_menu_press_is_immediate(void) {
     assert(ecard_ui_menu_selection() == ECARD_MENU_VOICE);
 }
 
+static void feed_test_pcm_ms(int16_t level, uint32_t duration_ms) {
+    int16_t chunk[320];
+    for (int i = 0; i < 320; ++i) {
+        chunk[i] = (i & 1) ? level : (int16_t)(-level);
+    }
+    const uint32_t chunks = duration_ms / 20u;
+    for (uint32_t c = 0; c < chunks; ++c) {
+        ecard_xiaozhi_feed_mic_pcm(chunk, 320);
+    }
+}
+
 static void test_ecard_app_ai_long_press_followup(void) {
+    extern bool ecard_stub_ai_ready;
+    extern bool ecard_stub_ai_speaking;
+    extern unsigned ecard_stub_listen_start_calls;
+    extern unsigned ecard_stub_listen_stop_calls;
+    extern unsigned ecard_stub_listen_cancel_calls;
+
+    ecard_stub_ai_ready = true;
+    ecard_stub_ai_speaking = false;
+    ecard_stub_listen_start_calls = 0;
+    ecard_stub_listen_stop_calls = 0;
+    ecard_stub_listen_cancel_calls = 0;
+
     ecard_app_init();
     clear_unread_messages();
 
@@ -451,24 +511,120 @@ static void test_ecard_app_ai_long_press_followup(void) {
     ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
     assert(ecard_ui_get_page() == ECARD_UI_PAGE_QUIZ);
 
-    // 长按 UP 必须进入追问录音，而不是被答题页的无条件 return 吞掉。
+    // 1. 讲解未播完时（barge-in）长按 UP 1~2 秒触发后松开：立即打断播报并进入免持聆听，倒计时从 10 秒开始
+    ecard_stub_ai_speaking = true;
+    const uint8_t selected = ecard_quiz_selected();
     ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_LONG);
+    assert(!ecard_xiaozhi_is_speaking());
     assert(ecard_app_get_state() == ECARD_APP_STATE_RECORDING);
+    assert(ecard_app_ai_listening());
     assert(ecard_ui_get_modal() == ECARD_UI_MODAL_RECORDING);
+    assert(ecard_ui_modal_remaining_sec() == 10);
+    assert(ecard_stub_listen_start_calls == 1);
 
-    // 录音中每秒刷新，不应提前结束。
-    ecard_app_tick(9, 40, 1000);
-    assert(ecard_app_get_state() == ECARD_APP_STATE_RECORDING);
-
-    // 松开 UP：发送并回到空闲。
     ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_RELEASE);
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_CLICK);
+    assert(ecard_app_get_state() == ECARD_APP_STATE_RECORDING);
+    assert(ecard_app_ai_listening());
+    assert(ecard_quiz_selected() == selected);
+
+    // 1b. 4x 数字增益后的环境底噪（~320）不得误触发人声检测
+    feed_test_pcm_ms(320, 600);
+    assert(!ecard_xiaozhi_mic_voice_detected());
+
+    // 2. 学生说话（400ms 有效语音）后停顿 1.5 秒：VAD 自动提交，无需再按键
+    feed_test_pcm_ms(1800, 400);
+    assert(ecard_xiaozhi_mic_voice_detected());
+    ecard_app_tick(9, 40, 600);
+    assert(ecard_app_ai_listening());
+
+    feed_test_pcm_ms(320, 1520);
+    assert(ecard_xiaozhi_mic_vad_complete());
+    ecard_app_tick(9, 40, 200);
+    assert(!ecard_app_ai_listening());
     assert(ecard_app_get_state() == ECARD_APP_STATE_IDLE);
     assert(ecard_ui_get_modal() == ECARD_UI_MODAL_NONE);
+    assert(ecard_stub_listen_stop_calls == 1);
 
-    // 松手后按键库可能补发一个 CLICK：必须被吞掉，不能翻动答题选项。
-    const uint8_t selected = ecard_quiz_selected();
-    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_CLICK);
-    assert(ecard_quiz_selected() == selected);
+    // 3. 多轮对话第 2 轮：小智 TTS 播完 + 400ms 静置后自动开启下一轮聆听，
+    //    倒计时必须统一从 10 秒单调递减，过 2 秒或开口说话后绝不跳回 9/8/7
+    ecard_stub_ai_speaking = true;
+    ecard_app_tick(9, 40, 1000);
+    assert(!ecard_app_ai_listening());
+    ecard_stub_ai_speaking = false;
+    ecard_app_tick(9, 40, 200);
+    assert(!ecard_app_ai_listening());
+    ecard_app_tick(9, 40, 200);
+    assert(ecard_app_ai_listening());
+    assert(ecard_app_get_state() == ECARD_APP_STATE_RECORDING);
+    assert(ecard_stub_listen_start_calls == 2);
+    assert(ecard_ui_modal_remaining_sec() == 10);
+
+    uint8_t prev_sec = ecard_ui_modal_remaining_sec();
+    for (int i = 0; i < 10; ++i) { // 经过 2 秒底噪：10 -> 9 -> 8
+        feed_test_pcm_ms(320, 200);
+        ecard_app_tick(9, 40, 200);
+        const uint8_t cur_sec = ecard_ui_modal_remaining_sec();
+        assert(cur_sec <= prev_sec);
+        prev_sec = cur_sec;
+    }
+    assert(prev_sec == 8);
+    // 第 2 秒后开口说话：倒计时继续从 8 往下走，绝不向上跳变
+    feed_test_pcm_ms(1600, 400);
+    assert(ecard_xiaozhi_mic_voice_detected());
+    ecard_app_tick(9, 40, 400);
+    assert(ecard_ui_modal_remaining_sec() <= prev_sec);
+    assert(ecard_ui_modal_remaining_sec() == 8);
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
+    assert(!ecard_app_ai_listening());
+    assert(ecard_stub_listen_stop_calls == 2);
+
+    // 4. 多轮对话第 3 轮：TTS 播完再次自动开启聆听（10s 单调倒数）；若 10 秒内无人说话，静默取消并退出多轮
+    ecard_stub_ai_speaking = true;
+    ecard_app_tick(9, 40, 600);
+    ecard_stub_ai_speaking = false;
+    ecard_app_tick(9, 40, 400);
+    assert(ecard_app_ai_listening());
+    assert(ecard_stub_listen_start_calls == 3);
+    assert(ecard_ui_modal_remaining_sec() == 10);
+
+    prev_sec = ecard_ui_modal_remaining_sec();
+    for (int i = 0; i < 49; ++i) {
+        feed_test_pcm_ms(320, 200);
+        ecard_app_tick(9, 40, 200);
+        assert(ecard_app_ai_listening());
+        const uint8_t cur_sec = ecard_ui_modal_remaining_sec();
+        assert(cur_sec <= prev_sec);
+        prev_sec = cur_sec;
+    }
+    feed_test_pcm_ms(320, 200);
+    ecard_app_tick(9, 40, 200);
+    assert(!ecard_app_ai_listening());
+    assert(ecard_app_get_state() == ECARD_APP_STATE_IDLE);
+    assert(ecard_stub_listen_cancel_calls == 1);
+    assert(ecard_stub_listen_stop_calls == 2);
+
+    // 5. 主动按 DOWN 取消聆听，以及满 10 秒硬上限自动提交
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_LONG);
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_RELEASE);
+    assert(ecard_app_ai_listening());
+    ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_CLICK);
+    assert(!ecard_app_ai_listening());
+    assert(ecard_stub_listen_cancel_calls == 2);
+
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_LONG);
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_RELEASE);
+    feed_test_pcm_ms(40, 200);
+    feed_test_pcm_ms(1500, 400);
+    for (int i = 0; i < 9; ++i) {
+        feed_test_pcm_ms(1500, 1000);
+        ecard_app_tick(9, 40, 1000);
+        assert(ecard_app_ai_listening());
+    }
+    ecard_app_tick(9, 40, 1000);
+    assert(!ecard_app_ai_listening());
+    assert(ecard_stub_listen_stop_calls == 3);
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_LONG);
 }
 
 static void test_ecard_app_playing_transcript_metadata(void) {
@@ -485,9 +641,13 @@ static void test_ecard_app_playing_transcript_metadata(void) {
     snprintf(incoming.text, sizeof(incoming.text), "%s", "下午三点操场集合");
     assert(ecard_messages_add(&incoming, 0) != 0);
 
-    // 首页点击 OK 播放最新未读：播放弹窗必须绑定发送方与转写文字
+    // 首页点击 OK 播放最新未读：200ms 心跳下不能提前按每次 tick 累加 1 秒
     ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
     assert(ecard_app_get_state() == ECARD_APP_STATE_PLAYING);
+    for (int i = 0; i < 15; ++i) {
+        ecard_app_tick(9, 40, 200);
+        assert(ecard_app_get_state() == ECARD_APP_STATE_PLAYING);
+    }
     const ecard_message_t *playing = ecard_ui_playing_message();
     assert(playing != NULL);
     assert(playing->sender_role == ECARD_SENDER_TEACHER);
@@ -600,7 +760,7 @@ static void test_pomodoro_on_demand_ai_and_points_and_abort(void) {
     assert(ecard_stub_ai_session_start_calls == starts_before);
     assert(!ecard_stub_lan_ai_busy);
 
-    // 1b. 连接尚未就绪时松开 UP：连上后不得自动跳进录音，保持 20s 就绪窗口与常驻提示；宽限后释放 HTTP
+    // 1b. 连接尚未就绪时按长按 UP 1~2s 后松手：连上后自动进入免持聆听，无需长按第二次；按 OK 发送或 DOWN 取消后保留 20s 宽限再释放 HTTP
     ecard_stub_ai_ready = false;
     ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_LONG);
     assert(ecard_stub_lan_ai_busy);
@@ -612,11 +772,11 @@ static void test_pomodoro_on_demand_ai_and_points_and_abort(void) {
     assert(strcmp(ecard_ui_pomodoro_override_hint(), "正在连接小智…") == 0);
     ecard_stub_ai_ready = true;
     ecard_app_tick(10, 0, 1000);
+    assert(ecard_app_ai_listening());
+    assert(ecard_app_get_state() == ECARD_APP_STATE_RECORDING);
+    ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_CLICK);
     assert(!ecard_app_ai_listening());
-    assert(strcmp(ecard_ui_pomodoro_override_hint(), "小智已就绪，长按 UP 说话") == 0);
-    ecard_ui_feed_activity();
-    (void)ecard_ui_poll_idle_state(4000);
-    assert(strcmp(ecard_ui_pomodoro_override_hint(), "小智已就绪，长按 UP 说话") == 0);
+    assert(ecard_app_get_state() == ECARD_APP_STATE_IDLE);
     for (int i = 0; i < 19; ++i) {
         ecard_app_tick(10, 0, 1000);
     }
@@ -625,7 +785,7 @@ static void test_pomodoro_on_demand_ai_and_points_and_abort(void) {
     assert(!ecard_stub_lan_ai_busy);
     assert(ecard_ui_pomodoro_override_hint()[0] == '\0');
 
-    // 2. 长按 UP 触发按需握手与监听；未就绪时持续按住，连上后自动进录音，20s 宽限后释放 HTTP
+    // 2. 长按 UP 触发连接并免持录音 + 多轮续聊；说完并超时退出多轮后再过 20s 释放 HTTP
     ecard_stub_ai_ready = false;
     ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_LONG);
     assert(ecard_stub_lan_ai_busy);
@@ -636,7 +796,10 @@ static void test_pomodoro_on_demand_ai_and_points_and_abort(void) {
     assert(ecard_app_ai_listening());
     assert(ecard_app_get_state() == ECARD_APP_STATE_RECORDING);
 
+    // 松开 UP 后仍在免持录音；按 OK 提交首轮提问
     ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_RELEASE);
+    assert(ecard_app_ai_listening());
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
     assert(!ecard_app_ai_listening());
     assert(ecard_app_get_state() == ECARD_APP_STATE_IDLE);
     // 若硬件未补发 CLICK，下一次真实短按 UP (PRESS -> RELEASE -> CLICK) 必须正常 +5 分钟
@@ -648,11 +811,15 @@ static void test_pomodoro_on_demand_ai_and_points_and_abort(void) {
     ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_CLICK);
     assert(ecard_pomodoro_focus_minutes() == min_before);
 
-    // 小智说话期间保持连接；说完后超过 20s 自动关闭会话、恢复 LAN HTTP
+    // 小智回答播完后自动开启第二轮免持聆听；按 DOWN 结束对话后满 20s 自动关闭会话并恢复 LAN HTTP
     ecard_stub_ai_speaking = true;
     ecard_app_tick(10, 0, 5000);
     assert(ecard_stub_lan_ai_busy);
     ecard_stub_ai_speaking = false;
+    ecard_app_tick(10, 0, 400);
+    assert(ecard_app_ai_listening());
+    ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_CLICK);
+    assert(!ecard_app_ai_listening());
     const unsigned stops_before = ecard_stub_ai_session_stop_calls;
     for (int i = 0; i < 20; ++i) {
         ecard_app_tick(10, 0, 1000);
@@ -660,7 +827,7 @@ static void test_pomodoro_on_demand_ai_and_points_and_abort(void) {
     assert(ecard_stub_ai_session_stop_calls == stops_before + 1);
     assert(!ecard_stub_lan_ai_busy);
 
-    // 2b. 专注计时中：点按 UP 即可松手触发连接，就绪后常驻提示 20s，再长按 UP 秒开录音
+    // 2b. 专注计时中：点按 UP 即可松手触发后台预连，就绪后常驻提示 20s，再长按 UP 秒开免持录音
     ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
     assert(ecard_pomodoro_phase() == ECARD_POMODORO_FOCUS);
     ecard_stub_ai_ready = false;
@@ -681,6 +848,8 @@ static void test_pomodoro_on_demand_ai_and_points_and_abort(void) {
     assert(ecard_app_ai_listening());
     assert(ecard_app_get_state() == ECARD_APP_STATE_RECORDING);
     ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_RELEASE);
+    assert(ecard_app_ai_listening());
+    ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_CLICK);
     assert(!ecard_app_ai_listening());
     for (int i = 0; i < 20; ++i) {
         ecard_app_tick(10, 0, 1000);
@@ -829,6 +998,110 @@ static void test_pomodoro_ai_connect_fail_resets_and_hints(void) {
     ecard_cat_room_reset_all();
 }
 
+static void test_pomodoro_focus_auto_pauses_during_ai_voice(void) {
+    extern bool ecard_stub_ai_ready;
+    extern bool ecard_stub_ai_speaking;
+    extern bool ecard_stub_ai_connect_failed;
+
+    ecard_stub_ai_ready = false;
+    ecard_stub_ai_speaking = false;
+    ecard_stub_ai_connect_failed = false;
+
+    ecard_app_init();
+    clear_unread_messages();
+    ecard_pomodoro_reset();
+    ecard_pomodoro_set_focus_minutes(ECARD_POMODORO_FOCUS_MIN);
+    nav_to_menu_item(ECARD_MENU_POMODORO);
+    assert(ecard_ui_get_page() == ECARD_UI_PAGE_POMODORO);
+
+    // 启动专注倒计时并跑 5 秒
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
+    assert(ecard_pomodoro_phase() == ECARD_POMODORO_FOCUS);
+    assert(ecard_pomodoro_is_running());
+    ecard_app_tick(10, 0, 5000);
+    const uint32_t frozen_ms = ecard_pomodoro_remaining_ms();
+    assert(frozen_ms == (uint32_t)ECARD_POMODORO_FOCUS_MIN * 60000u - 5000u);
+
+    // 1. 长按 UP 触发小智连接 + 语音交互：专注倒计时立即自动暂停，连接/聆听/回答/多轮续聊全程不扣秒
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_LONG);
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_RELEASE);
+    assert(!ecard_pomodoro_is_running());
+    assert(ecard_app_pomo_ai_paused());
+
+    ecard_app_tick(10, 0, 2000); // 连接等待期不扣秒
+    assert(ecard_pomodoro_remaining_ms() == frozen_ms);
+
+    ecard_stub_ai_ready = true;
+    ecard_app_tick(10, 0, 200); // 自动进入第 1 轮聆听
+    assert(ecard_app_ai_listening());
+    assert(!ecard_pomodoro_is_running());
+    assert(ecard_pomodoro_remaining_ms() == frozen_ms);
+
+    feed_test_pcm_ms(1800, 600);
+    ecard_app_tick(10, 0, 600);
+    feed_test_pcm_ms(100, 1520);
+    ecard_app_tick(10, 0, 200); // VAD 自动提交，进入等待回答期
+    assert(!ecard_app_ai_listening());
+    assert(!ecard_pomodoro_is_running());
+    assert(ecard_pomodoro_remaining_ms() == frozen_ms);
+
+    ecard_stub_ai_speaking = true;
+    ecard_app_tick(10, 0, 3000); // 小智语音播报期不扣秒
+    assert(!ecard_pomodoro_is_running());
+    assert(ecard_pomodoro_remaining_ms() == frozen_ms);
+
+    ecard_stub_ai_speaking = false;
+    ecard_app_tick(10, 0, 400); // 自动进入第 2 轮续聊聆听，仍保持暂停
+    assert(ecard_app_ai_listening());
+    assert(!ecard_pomodoro_is_running());
+    assert(ecard_pomodoro_remaining_ms() == frozen_ms);
+
+    // 2. 学生按 DOWN 结束语音对话：专注倒计时立即自动恢复读秒！
+    ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_CLICK);
+    assert(!ecard_app_ai_listening());
+    assert(!ecard_app_pomo_ai_paused());
+    assert(ecard_pomodoro_phase() == ECARD_POMODORO_FOCUS);
+    assert(ecard_pomodoro_is_running());
+    ecard_app_tick(10, 0, 2000);
+    assert(ecard_pomodoro_remaining_ms() == frozen_ms - 2000u);
+
+    // 3. 小智正在说话时按 DOWN：仅结束语音交流并恢复专注读秒，绝不误清空本轮专注！
+    const uint32_t before_barge = ecard_pomodoro_remaining_ms();
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_LONG);
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_RELEASE);
+    feed_test_pcm_ms(1800, 600);
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
+    ecard_stub_ai_speaking = true;
+    ecard_app_tick(10, 0, 1000);
+    assert(!ecard_pomodoro_is_running());
+    assert(ecard_pomodoro_remaining_ms() == before_barge);
+
+    ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_CLICK);
+    assert(!ecard_xiaozhi_is_speaking());
+    assert(ecard_pomodoro_phase() == ECARD_POMODORO_FOCUS);
+    assert(ecard_pomodoro_is_running());
+    ecard_app_tick(10, 0, 1000);
+    assert(ecard_pomodoro_remaining_ms() == before_barge - 1000u);
+
+    // 4. 若学生原本已手动按 OK 暂停专注，与小智交流结束后保持手动暂停，不擅自启动计时
+    ecard_app_handle_key(BSP_BTN_OK, BSP_BTN_CLICK);
+    assert(!ecard_pomodoro_is_running());
+    assert(!ecard_app_pomo_ai_paused());
+    const uint32_t manual_paused_ms = ecard_pomodoro_remaining_ms();
+
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_LONG);
+    ecard_app_handle_key(BSP_BTN_UP, BSP_BTN_RELEASE);
+    assert(ecard_app_ai_listening());
+    ecard_app_handle_key(BSP_BTN_DOWN, BSP_BTN_CLICK);
+    assert(!ecard_app_ai_listening());
+    assert(!ecard_pomodoro_is_running());
+    ecard_app_tick(10, 0, 2000);
+    assert(ecard_pomodoro_remaining_ms() == manual_paused_ms);
+
+    ecard_pomodoro_reset();
+    ecard_cat_room_reset_all();
+}
+
 int main(void) {
     printf("Running ecard_app tests...\n");
     test_ecard_app_recording_lifecycle();
@@ -851,6 +1124,7 @@ int main(void) {
     test_pomodoro_on_demand_ai_and_points_and_abort();
     test_device_to_pair_navigation();
     test_pomodoro_ai_connect_fail_resets_and_hints();
+    test_pomodoro_focus_auto_pauses_during_ai_voice();
     printf("ecard_app tests passed!\n");
     return 0;
 }

@@ -63,6 +63,9 @@ size_t ecard_app_render_playback_pcm(int16_t *out, size_t max_samples);
 /** 当前是否处于“小智追问”录音（仅编码上传，不写本地缓冲）。 */
 bool ecard_app_ai_listening(void);
 
+/** 番茄钟专注计时当前是否因小智语音交互而自动暂停。 */
+bool ecard_app_pomo_ai_paused(void);
+
 typedef void (*ecard_app_record_full_cb_t)(void);
 
 /** 注册录音录满上限时的异步收尾回调（投递给 input_task，避免在 audio_task 栈写 SPIFFS）。 */
